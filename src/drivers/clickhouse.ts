@@ -1,0 +1,177 @@
+import https from 'https'
+import http from 'http'
+import {
+  ConnectionTestResult,
+  DatabaseCatalog,
+  DatabaseDriverId,
+  DbConnectionProfile,
+  QueryRequest,
+  QueryResult,
+  SchemaObject,
+  SchemaObjectType,
+  SchemaScope
+} from '@/core/types'
+import { DatabaseDriver } from './base'
+import { SecretService } from '@/services/secretService'
+
+interface ClickHouseResponse {
+  meta?: Array<{ name: string; type: string }>
+  data?: Record<string, unknown>[]
+  rows?: number
+  statistics?: { elapsed: number }
+}
+
+export class ClickHouseDriver implements DatabaseDriver {
+  id: DatabaseDriverId = 'clickhouse'
+  displayName = 'ClickHouse'
+  capabilities = {
+    schemaBrowse: true,
+    query: true,
+    dataEdit: false,
+    transactions: false,
+    explain: true,
+    erd: false,
+    importExport: true,
+    backupRestore: false,
+    streaming: false
+  }
+
+  private async getPassword(profile: DbConnectionProfile): Promise<string> {
+    try {
+      const secretService = SecretService.getInstance()
+      return (await secretService.getPassword(profile.id)) || ''
+    } catch {
+      return ''
+    }
+  }
+
+  private getBaseUrl(profile: DbConnectionProfile): string {
+    const protocol = profile.ssl ? 'https' : 'http'
+    const host = profile.host || 'localhost'
+    const port = profile.port || 8123
+    return `${protocol}://${host}:${port}`
+  }
+
+  private async query(profile: DbConnectionProfile, sql: string): Promise<ClickHouseResponse> {
+    const baseUrl = this.getBaseUrl(profile)
+    const url = new URL(baseUrl)
+    url.pathname = '/'
+    url.searchParams.set('query', sql)
+
+    const username = profile.username || 'default'
+    const password = await this.getPassword(profile)
+
+    const options: http.RequestOptions = {
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname + url.search,
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'X-ClickHouse-User': username,
+        'X-ClickHouse-Key': password
+      }
+    }
+
+    return new Promise((resolve, reject) => {
+      const client = profile.ssl ? https : http
+      const req = client.request(options, (res) => {
+        let data = ''
+        res.on('data', chunk => data += chunk)
+        res.on('end', () => {
+          try {
+            const json = JSON.parse(data)
+            if (json.exception) {
+              reject(new Error(json.exception))
+            } else {
+              resolve(json)
+            }
+          } catch {
+            reject(new Error(`Invalid response: ${data.substring(0, 200)}`))
+          }
+        })
+      })
+      req.on('error', reject)
+      req.end()
+    })
+  }
+
+  async testConnection(profile: DbConnectionProfile): Promise<ConnectionTestResult> {
+    const start = Date.now()
+    try {
+      await this.query(profile, 'SELECT 1')
+      return {
+        ok: true,
+        message: 'Connection successful',
+        latencyMs: Date.now() - start
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        message: error instanceof Error ? error.message : String(error)
+      }
+    }
+  }
+
+  async listDatabases(profile: DbConnectionProfile): Promise<DatabaseCatalog[]> {
+    const result = await this.query(profile, 'SHOW DATABASES')
+    return (result.data || []).map((row: Record<string, unknown>) => ({
+      name: String(row.name || '')
+    }))
+  }
+
+  async listObjects(profile: DbConnectionProfile, scope: SchemaScope): Promise<SchemaObject[]> {
+    const objects: SchemaObject[] = []
+
+    if (!scope.database) {
+      // List databases
+      const databases = await this.listDatabases(profile)
+      for (const db of databases) {
+        objects.push({
+          name: db.name,
+          type: 'schema' as SchemaObjectType,
+          description: 'Database'
+        })
+      }
+    } else {
+      // List tables in the database
+      const result = await this.query(profile, `SHOW TABLES FROM ${scope.database}`)
+      for (const row of result.data || []) {
+        const tableName = Object.values(row)[0] as string
+        objects.push({
+          name: tableName,
+          type: 'table' as SchemaObjectType,
+          description: 'Table'
+        })
+      }
+    }
+
+    return objects
+  }
+
+  async executeQuery(profile: DbConnectionProfile, request: QueryRequest): Promise<QueryResult> {
+    const start = Date.now()
+
+    try {
+      const sql = request.limit
+        ? `${request.sql} LIMIT ${request.limit} FORMAT JSON`
+        : `${request.sql} FORMAT JSON`
+
+      const result = await this.query(profile, sql)
+
+      const columns = (result.meta || []).map(col => ({
+        name: col.name,
+        type: col.type
+      }))
+
+      return {
+        columns,
+        rows: result.data || [],
+        rowCount: result.rows || 0,
+        elapsedMs: Date.now() - start
+      }
+    } catch (error) {
+      throw new Error(error instanceof Error ? error.message : String(error))
+    }
+  }
+}

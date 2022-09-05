@@ -1,0 +1,342 @@
+{
+  "name": "db-nexus",
+  "displayName": "DB Nexus",
+  "description": "A multi-database workbench for VS Code with schema browsing, query execution, data editing, and AI-ready architecture.",
+  "version": "0.1.0",
+  "publisher": "kamalyes",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kamalyes/db-nexus"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Data Science",
+    "Other"
+  ],
+  "keywords": [
+    "database",
+    "sql",
+    "postgresql",
+    "mysql",
+    "sqlite",
+    "mongodb",
+    "redis",
+    "duckdb",
+    "vscode"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:dbNexus.connections",
+    "onCommand:dbNexus.addConnection",
+    "onCommand:dbNexus.runQuery"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "dbNexus.openDashboard",
+        "title": "%dbNexus.openDashboard.title%",
+        "category": "%dbNexus.category%",
+        "icon": "$(database)"
+      },
+      {
+        "command": "dbNexus.addConnection",
+        "title": "%dbNexus.addConnection.title%",
+        "category": "%dbNexus.category%",
+        "icon": {
+          "dark": "resources/icons/dark/add-connection.svg",
+          "light": "resources/icons/light/add-connection.svg"
+        }
+      },
+      {
+        "command": "dbNexus.refreshConnections",
+        "title": "%dbNexus.refreshConnections.title%",
+        "category": "%dbNexus.category%",
+        "icon": {
+          "dark": "resources/icons/dark/refresh.svg",
+          "light": "resources/icons/light/refresh.svg"
+        }
+      },
+      {
+        "command": "dbNexus.testConnection",
+        "title": "%dbNexus.testConnection.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.editConnection",
+        "title": "%dbNexus.editConnection.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.deleteConnection",
+        "title": "%dbNexus.deleteConnection.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.openSqlScratch",
+        "title": "%dbNexus.openSqlScratch.title%",
+        "category": "%dbNexus.category%",
+        "icon": {
+          "dark": "resources/icons/dark/new-sql.svg",
+          "light": "resources/icons/light/new-sql.svg"
+        }
+      },
+      {
+        "command": "dbNexus.runQuery",
+        "title": "%dbNexus.runQuery.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.showArchitecture",
+        "title": "%dbNexus.showArchitecture.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.showTableSchema",
+        "title": "%dbNexus.showTableSchema.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.showTableData",
+        "title": "%dbNexus.showTableData.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.showTableList",
+        "title": "%dbNexus.showTableList.title%",
+        "category": "%dbNexus.category%",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "dbNexus.showQueryHistory",
+        "title": "%dbNexus.showQueryHistory.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.clearQueryHistory",
+        "title": "%dbNexus.clearQueryHistory.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.showExecutionPlan",
+        "title": "%dbNexus.showExecutionPlan.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.showDDL",
+        "title": "%dbNexus.showDDL.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.exportToCSV",
+        "title": "%dbNexus.exportToCSV.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.exportToJSON",
+        "title": "%dbNexus.exportToJSON.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.exportToSQL",
+        "title": "%dbNexus.exportToSQL.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.importFromCSV",
+        "title": "%dbNexus.importFromCSV.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.importFromJSON",
+        "title": "%dbNexus.importFromJSON.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.showERDiagram",
+        "title": "%dbNexus.showERDiagram.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.backupDatabase",
+        "title": "%dbNexus.backupDatabase.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.restoreDatabase",
+        "title": "%dbNexus.restoreDatabase.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.compareSchemas",
+        "title": "%dbNexus.compareSchemas.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.migrateData",
+        "title": "%dbNexus.migrateData.title%",
+        "category": "%dbNexus.category%"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "dbNexus.addConnection"
+        },
+        {
+          "command": "dbNexus.openSqlScratch"
+        },
+        {
+          "command": "dbNexus.runQuery"
+        },
+        {
+          "command": "dbNexus.showArchitecture"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "dbNexus.openDashboard",
+          "when": "view == dbNexus.connections",
+          "group": "navigation@0"
+        },
+        {
+          "command": "dbNexus.addConnection",
+          "when": "view == dbNexus.connections",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dbNexus.openSqlScratch",
+          "when": "view == dbNexus.connections",
+          "group": "navigation@2"
+        },
+        {
+          "command": "dbNexus.refreshConnections",
+          "when": "view == dbNexus.connections",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "dbNexus.testConnection",
+          "when": "view == dbNexus.connections && viewItem == connection",
+          "group": "1_connection@1"
+        },
+        {
+          "command": "dbNexus.editConnection",
+          "when": "view == dbNexus.connections && viewItem == connection",
+          "group": "1_connection@2"
+        },
+        {
+          "command": "dbNexus.deleteConnection",
+          "when": "view == dbNexus.connections && viewItem == connection",
+          "group": "1_connection@3"
+        },
+        {
+          "command": "dbNexus.showTableSchema",
+          "when": "view == dbNexus.connections && viewItem == table",
+          "group": "2_table@1"
+        },
+        {
+          "command": "dbNexus.showTableData",
+          "when": "view == dbNexus.connections && viewItem == table",
+          "group": "2_table@2"
+        },
+        {
+          "command": "dbNexus.showTableList",
+          "when": "view == dbNexus.connections && viewItem == tables.group",
+          "group": "inline@1"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "dbNexus.runQuery",
+          "when": "resourceLangId == sql",
+          "group": "navigation@1"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "dbNexus",
+          "title": "%dbNexus.container.title%",
+          "icon": "assets/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "dbNexus": [
+        {
+          "id": "dbNexus.connections",
+          "name": "%dbNexus.connections.name%"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "DB Nexus",
+      "properties": {
+        "dbNexus.connections": {
+          "type": "array",
+          "default": [],
+          "description": "%dbNexus.connections.description%",
+          "items": {
+            "type": "object"
+          }
+        },
+        "dbNexus.defaultQueryLimit": {
+          "type": "number",
+          "default": 500,
+          "minimum": 1,
+          "maximum": 10000,
+          "description": "%dbNexus.defaultQueryLimit.description%"
+        },
+        "dbNexus.enablePreviewDrivers": {
+          "type": "boolean",
+          "default": true,
+          "description": "%dbNexus.enablePreviewDrivers.description%"
+        },
+        "dbNexus.displayLanguage": {
+          "type": "string",
+          "default": "",
+          "enum": [
+            "",
+            "en",
+            "zh-CN"
+          ],
+          "enumItemLabels": [
+            "%dbNexus.displayLanguage.auto%",
+            "%dbNexus.displayLanguage.english%",
+            "%dbNexus.displayLanguage.zhCN%"
+          ],
+          "description": "%dbNexus.displayLanguage.description%"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "webpack --mode production",
+    "dev": "webpack --mode development --watch",
+    "lint": "tsc --noEmit",
+    "package": "npm run build && vsce package"
+  },
+  "dependencies": {
+    "duckdb": "^1.1.0",
+    "mysql2": "^3.9.0",
+    "pg": "^8.11.0",
+    "sql.js": "^1.10.0"
+  },
+  "devDependencies": {
+    "@types/mysql2": "github:types/mysql2",
+    "@types/node": "^20.0.0",
+    "@types/pg": "^8.10.0",
+    "@types/sql.js": "^1.4.11",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.32.0",
+    "ts-loader": "^9.5.0",
+    "typescript": "^5.3.0",
+    "webpack": "^5.90.0",
+    "webpack-cli": "^5.1.0"
+  }
+}
