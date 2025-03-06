@@ -1,7 +1,7 @@
 import { ExtensionContext, ProgressLocation, Uri, commands, window, workspace } from 'vscode'
 import { ConnectionStore } from '@/core/connectionStore'
 import { SUPPORTED_DRIVERS } from '@/core/constants'
-import { DatabaseDriverId, DbConnectionProfile } from '@/core/types'
+import { DatabaseDriverId, DbConnectionProfile, SchemaObject, SchemaScope, TableSchema } from '@/core/types'
 import { DriverRegistry } from '@/drivers/registry'
 import { getCurrentLanguage, initI18n, reloadI18n, t } from '@/i18n'
 import { ConnectionNode, ConnectionsTreeProvider, SchemaNode, TablesGroupNode } from '@/providers/connectionsTree'
@@ -24,6 +24,13 @@ import { ConnectionDashboard } from '@/webviews/connectionDashboard'
 
 let connectionsTreeProvider: ConnectionsTreeProvider | undefined
 
+type TableTarget = {
+  profile: DbConnectionProfile
+  scope: SchemaScope
+  tableName: string
+  objectType: SchemaObject['type']
+}
+
 export function activate(context: ExtensionContext): void {
   initI18n(context.extensionPath)
   SecretService.init(context)
@@ -36,6 +43,160 @@ export function activate(context: ExtensionContext): void {
   const queryService = new QueryService(driverRegistry)
 
   connectionsTreeProvider = new ConnectionsTreeProvider(connectionService, context.extensionPath)
+
+  const resolveNodeContext = async (
+    node: ConnectionNode | SchemaNode | TablesGroupNode | undefined
+  ): Promise<{ profile: DbConnectionProfile; scope: SchemaScope } | undefined> => {
+    if (node instanceof ConnectionNode) {
+      return { profile: node.profile, scope: {} }
+    }
+    if (node instanceof TablesGroupNode) {
+      return { profile: node.connectionProfile, scope: node.scope || {} }
+    }
+    if (node instanceof SchemaNode) {
+      return { profile: node.connectionProfile, scope: node.scope || {} }
+    }
+
+    const profile = await pickConnection(connectionService.getConnections())
+    return profile ? { profile, scope: {} } : undefined
+  }
+
+  const resolveTableTarget = async (
+    node: SchemaNode | TablesGroupNode | undefined
+  ): Promise<TableTarget | undefined> => {
+    if (node instanceof SchemaNode && isTableLikeNode(node)) {
+      return {
+        profile: node.connectionProfile,
+        scope: node.scope || {},
+        tableName: node.schemaObject.name,
+        objectType: node.schemaObject.type
+      }
+    }
+
+    const dbContext = await resolveNodeContext(node)
+    if (!dbContext) return undefined
+
+    const objects = await connectionService.listObjects(dbContext.profile, dbContext.scope)
+    const tables = objects.filter(isTableLikeObject)
+    if (tables.length === 0) {
+      window.showWarningMessage(t('connection.emptySchema'))
+      return undefined
+    }
+
+    const picked = await window.showQuickPick(
+      tables.map(table => ({
+        label: table.name,
+        description: table.type,
+        table
+      })),
+      { placeHolder: t('table.selectTable') }
+    )
+
+    if (!picked) return undefined
+
+    return {
+      profile: dbContext.profile,
+      scope: dbContext.scope,
+      tableName: picked.table.name,
+      objectType: picked.table.type
+    }
+  }
+
+  const executeSql = async (profile: DbConnectionProfile, sql: string) => {
+    return driverRegistry.getDriver(profile.driverId).executeQuery(profile, { sql })
+  }
+
+  const exportTable = async (target: TableTarget, format: 'csv' | 'json' | 'sql'): Promise<void> => {
+    try {
+      const qualifiedName = getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)
+      const result = await executeSql(target.profile, `SELECT * FROM ${qualifiedName}`)
+      if (format === 'csv') {
+        await DataExportService.exportToCSV(result, target.tableName)
+      } else if (format === 'json') {
+        await DataExportService.exportToJSON(result, target.tableName)
+      } else {
+        await DataExportService.exportToSQL(result, target.tableName, `${target.tableName}_insert`)
+      }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      window.showErrorMessage(t('export.failed', message))
+    }
+  }
+
+  const importTable = async (target: TableTarget, format: 'csv' | 'json'): Promise<void> => {
+    const driver = driverRegistry.getDriver(target.profile.driverId)
+    if (!driver?.planInsert || !driver?.executeMutation) {
+      window.showErrorMessage(t('import.notSupported'))
+      return
+    }
+
+    try {
+      const rows = format === 'csv'
+        ? await DataExportService.importFromCSV()
+        : await DataExportService.importFromJSON()
+      if (!rows || rows.length === 0) return
+
+      let inserted = 0
+      for (const row of rows) {
+        const plan = await driver.planInsert(target.profile, target.tableName, row, target.scope)
+        const result = await driver.executeMutation(target.profile, plan)
+        if (result.success) {
+          inserted++
+        }
+      }
+
+      window.showInformationMessage(t('import.success', String(inserted)))
+      connectionsTreeProvider?.refresh()
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      window.showErrorMessage(t('import.failed', message))
+    }
+  }
+
+  const showDataDictionary = async (node: SchemaNode | TablesGroupNode | undefined): Promise<void> => {
+    const dbContext = await resolveNodeContext(node)
+    if (!dbContext) return
+
+    const driver = driverRegistry.getDriver(dbContext.profile.driverId)
+    if (!driver?.getTableSchema) {
+      window.showErrorMessage(t('table.schemaNotSupported'))
+      return
+    }
+
+    const targets: TableTarget[] = []
+    if (node instanceof SchemaNode && isTableLikeNode(node)) {
+      targets.push({
+        profile: node.connectionProfile,
+        scope: node.scope || {},
+        tableName: node.schemaObject.name,
+        objectType: node.schemaObject.type
+      })
+    } else {
+      const objects = await connectionService.listObjects(dbContext.profile, dbContext.scope)
+      targets.push(...objects.filter(isTableLikeObject).map(object => ({
+        profile: dbContext.profile,
+        scope: dbContext.scope,
+        tableName: object.name,
+        objectType: object.type
+      })))
+    }
+
+    if (targets.length === 0) {
+      window.showWarningMessage(t('connection.emptySchema'))
+      return
+    }
+
+    const schemas: TableSchema[] = []
+    for (const target of targets) {
+      schemas.push(await driver.getTableSchema(target.profile, target.tableName, target.scope))
+    }
+
+    const document = await workspace.openTextDocument({
+      language: 'markdown',
+      content: buildDataDictionary(dbContext.profile, dbContext.scope, schemas)
+    })
+    await window.showTextDocument(document)
+  }
 
   context.subscriptions.push(
     outputChannel,
@@ -147,6 +308,9 @@ export function activate(context: ExtensionContext): void {
       const document = await workspace.openTextDocument(uri)
       await window.showTextDocument(document)
     }),
+    commands.registerCommand('dbNexus.openTable', async (node: SchemaNode | undefined) => {
+      await commands.executeCommand('dbNexus.showTableData', node)
+    }),
     commands.registerCommand('dbNexus.showTableSchema', async (node: SchemaNode | undefined) => {
       if (!node || !isTableLikeNode(node)) {
         window.showWarningMessage(t('table.selectTable'))
@@ -206,6 +370,192 @@ export function activate(context: ExtensionContext): void {
         const message = error instanceof Error ? error.message : String(error)
         window.showErrorMessage(t('connection.loadError', message))
       }
+    }),
+    commands.registerCommand('dbNexus.createTable', async (node: TablesGroupNode | SchemaNode | undefined) => {
+      const dbContext = await resolveNodeContext(node)
+      if (!dbContext) return
+
+      const tableName = await window.showInputBox({
+        prompt: t('table.newTableName'),
+        value: 'new_table'
+      })
+      if (!tableName) return
+
+      const qualifiedName = getQualifiedObjectName(dbContext.profile.driverId, dbContext.scope, tableName)
+      const document = await workspace.openTextDocument({
+        language: 'sql',
+        content: [
+          `CREATE TABLE ${qualifiedName} (`,
+          '  id INT PRIMARY KEY',
+          ');',
+          ''
+        ].join('\n')
+      })
+      await window.showTextDocument(document)
+    }),
+    commands.registerCommand('dbNexus.designTable', async (node: SchemaNode | undefined) => {
+      await commands.executeCommand('dbNexus.showTableSchema', node)
+    }),
+    commands.registerCommand('dbNexus.deleteTable', async (node: SchemaNode | undefined) => {
+      const target = await resolveTableTarget(node)
+      if (!target) return
+
+      const confirm = await window.showWarningMessage(
+        t('table.deleteConfirm', target.tableName),
+        { modal: true },
+        t('common.delete')
+      )
+      if (confirm !== t('common.delete')) return
+
+      try {
+        const objectKind = target.objectType === 'view' || target.objectType === 'materializedView'
+          ? target.objectType === 'materializedView' ? 'MATERIALIZED VIEW' : 'VIEW'
+          : 'TABLE'
+        const qualifiedName = getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)
+        await executeSql(target.profile, `DROP ${objectKind} ${qualifiedName}`)
+        connectionsTreeProvider?.refresh()
+        window.showInformationMessage(t('table.deleted', target.tableName))
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error)
+        window.showErrorMessage(t('table.deleteFailed', message))
+      }
+    }),
+    commands.registerCommand('dbNexus.importWizard', async (node: SchemaNode | TablesGroupNode | undefined) => {
+      const target = await resolveTableTarget(node)
+      if (!target) return
+
+      const format = await window.showQuickPick(
+        [
+          { label: 'CSV', value: 'csv' as const },
+          { label: 'JSON', value: 'json' as const }
+        ],
+        { placeHolder: t('table.importWizard') }
+      )
+      if (!format) return
+
+      await importTable(target, format.value)
+    }),
+    commands.registerCommand('dbNexus.exportWizard', async (node: SchemaNode | TablesGroupNode | undefined) => {
+      const target = await resolveTableTarget(node)
+      if (!target) return
+
+      const format = await window.showQuickPick(
+        [
+          { label: 'CSV', value: 'csv' as const },
+          { label: 'JSON', value: 'json' as const },
+          { label: 'SQL', value: 'sql' as const }
+        ],
+        { placeHolder: t('table.exportWizard') }
+      )
+      if (!format) return
+
+      await exportTable(target, format.value)
+    }),
+    commands.registerCommand('dbNexus.showDataDictionary', async (node: SchemaNode | TablesGroupNode | undefined) => {
+      try {
+        await showDataDictionary(node)
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error)
+        window.showErrorMessage(t('table.schemaFailed', message))
+      }
+    }),
+    commands.registerCommand('dbNexus.generateData', async (node: SchemaNode | TablesGroupNode | undefined) => {
+      const target = await resolveTableTarget(node)
+      if (!target) return
+
+      const driver = driverRegistry.getDriver(target.profile.driverId)
+      if (!driver?.getTableSchema) {
+        window.showErrorMessage(t('table.schemaNotSupported'))
+        return
+      }
+
+      try {
+        const schema = await driver.getTableSchema(target.profile, target.tableName, target.scope)
+        const qualifiedName = getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)
+        const columns = schema.columns.filter(column => !column.isAutoIncrement)
+        const document = await workspace.openTextDocument({
+          language: 'sql',
+          content: buildInsertTemplate(target.profile.driverId, qualifiedName, columns)
+        })
+        await window.showTextDocument(document)
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error)
+        window.showErrorMessage(t('table.schemaFailed', message))
+      }
+    }),
+    commands.registerCommand('dbNexus.runSqlFile', async (node: ConnectionNode | SchemaNode | TablesGroupNode | undefined) => {
+      const dbContext = await resolveNodeContext(node)
+      if (!dbContext) return
+
+      const uris = await window.showOpenDialog({
+        canSelectFiles: true,
+        canSelectFolders: false,
+        canSelectMany: false,
+        filters: {
+          'SQL Files': ['sql']
+        }
+      })
+      if (!uris || uris.length === 0) return
+
+      try {
+        const sql = new TextDecoder().decode(await workspace.fs.readFile(uris[0]))
+        const result = await window.withProgress(
+          { location: ProgressLocation.Notification, title: t('table.runningSqlFile') },
+          () => executeSql(dbContext.profile, sql)
+        )
+        ResultPanel.show(context, t('query.resultTitle', dbContext.profile.name), result)
+        await QueryHistoryService.getInstance().add(sql, dbContext.profile, result)
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error)
+        outputChannel.appendLine(message)
+        window.showErrorMessage(t('query.failed', message))
+      }
+    }),
+    commands.registerCommand('dbNexus.searchDatabase', async (node: ConnectionNode | SchemaNode | TablesGroupNode | undefined) => {
+      const dbContext = await resolveNodeContext(node)
+      if (!dbContext) return
+
+      const keyword = await window.showInputBox({
+        prompt: t('table.searchDatabase'),
+        placeHolder: t('table.searchTables')
+      })
+      if (!keyword) return
+
+      try {
+        const objects = await connectionService.listObjects(dbContext.profile, dbContext.scope)
+        const matches = objects.filter(object => object.name.toLowerCase().includes(keyword.toLowerCase()))
+        if (matches.length === 0) {
+          window.showInformationMessage(t('table.noMatches'))
+          return
+        }
+
+        const picked = await window.showQuickPick(
+          matches.map(object => ({
+            label: object.name,
+            description: object.type,
+            object
+          })),
+          { placeHolder: t('table.searchDatabase') }
+        )
+        if (!picked || !isTableLikeObject(picked.object)) return
+
+        TableDataPanel.show(
+          context,
+          dbContext.profile,
+          driverRegistry.getDriver(dbContext.profile.driverId),
+          picked.object.name,
+          dbContext.scope
+        )
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error)
+        window.showErrorMessage(t('connection.loadError', message))
+      }
+    }),
+    commands.registerCommand('dbNexus.createGroup', async () => {
+      window.showInformationMessage(t('table.groupNotSupported'))
+    }),
+    commands.registerCommand('dbNexus.pasteIntoDatabase', async () => {
+      window.showInformationMessage(t('table.pasteNotSupported'))
     }),
     commands.registerCommand('dbNexus.showExecutionPlan', async () => {
       const profile = await pickConnection(connectionService.getConnections())
@@ -750,4 +1100,143 @@ function isTableLikeNode(node: SchemaNode): boolean {
   return node.schemaObject.type === 'table'
     || node.schemaObject.type === 'view'
     || node.schemaObject.type === 'materializedView'
+}
+
+function isTableLikeObject(object: SchemaObject): boolean {
+  return object.type === 'table'
+    || object.type === 'view'
+    || object.type === 'materializedView'
+}
+
+function getQualifiedObjectName(
+  driverId: DatabaseDriverId,
+  scope: SchemaScope,
+  objectName: string
+): string {
+  const parts: string[] = []
+
+  if (driverId === 'mysql' || driverId === 'mariadb' || driverId === 'clickhouse') {
+    if (scope.database) {
+      parts.push(scope.database)
+    }
+  } else if (driverId !== 'sqlite' && driverId !== 'duckdb') {
+    if (scope.schema) {
+      parts.push(scope.schema)
+    } else if (scope.database) {
+      parts.push(scope.database)
+    }
+  }
+
+  parts.push(objectName)
+  return parts.map(part => quoteSqlIdentifier(driverId, part)).join('.')
+}
+
+function quoteSqlIdentifier(driverId: DatabaseDriverId, identifier: string): string {
+  const text = String(identifier)
+  if (driverId === 'mysql' || driverId === 'mariadb' || driverId === 'clickhouse') {
+    return `\`${text.replace(/`/g, '``')}\``
+  }
+  return `"${text.replace(/"/g, '""')}"`
+}
+
+function buildInsertTemplate(
+  driverId: DatabaseDriverId,
+  qualifiedName: string,
+  columns: TableSchema['columns']
+): string {
+  if (columns.length === 0) {
+    return `INSERT INTO ${qualifiedName} DEFAULT VALUES;\n`
+  }
+
+  const columnList = columns
+    .map(column => `  ${quoteSqlIdentifier(driverId, column.name)}`)
+    .join(',\n')
+  const valueList = columns
+    .map(column => `  ${sampleSqlValue(column.type, column.nullable)}`)
+    .join(',\n')
+
+  return [
+    `INSERT INTO ${qualifiedName} (`,
+    columnList,
+    ') VALUES (',
+    valueList,
+    ');',
+    ''
+  ].join('\n')
+}
+
+function sampleSqlValue(type: string, nullable: boolean): string {
+  const lowerType = type.toLowerCase()
+  if (nullable) {
+    return 'NULL'
+  }
+  if (lowerType.includes('int') || lowerType.includes('decimal') || lowerType.includes('number') || lowerType.includes('float') || lowerType.includes('double')) {
+    return '0'
+  }
+  if (lowerType.includes('bool')) {
+    return 'FALSE'
+  }
+  if (lowerType.includes('date') || lowerType.includes('time')) {
+    return 'CURRENT_TIMESTAMP'
+  }
+  return "'sample'"
+}
+
+function buildDataDictionary(
+  profile: DbConnectionProfile,
+  scope: SchemaScope,
+  schemas: TableSchema[]
+): string {
+  const title = [profile.name, scope.database, scope.schema].filter(Boolean).join(' / ')
+  const lines: string[] = [
+    `# Data Dictionary: ${title}`,
+    ''
+  ]
+
+  for (const schema of schemas) {
+    lines.push(`## ${schema.name}`, '')
+    if (schema.comment) {
+      lines.push(schema.comment, '')
+    }
+
+    lines.push('| Column | Type | Nullable | Key | Default | Comment |')
+    lines.push('| --- | --- | --- | --- | --- | --- |')
+    for (const column of schema.columns) {
+      lines.push([
+        escapeMarkdownCell(column.name),
+        escapeMarkdownCell(column.type),
+        column.nullable ? 'YES' : 'NO',
+        column.isPrimaryKey ? 'PRIMARY' : '',
+        escapeMarkdownCell(column.defaultValue || ''),
+        escapeMarkdownCell(column.comment || '')
+      ].join(' | ').replace(/^/, '| ').replace(/$/, ' |'))
+    }
+    lines.push('')
+
+    if (schema.indexes.length > 0) {
+      lines.push('### Indexes', '')
+      lines.push('| Name | Columns | Unique | Primary | Type |')
+      lines.push('| --- | --- | --- | --- | --- |')
+      for (const index of schema.indexes) {
+        lines.push(`| ${escapeMarkdownCell(index.name)} | ${escapeMarkdownCell(index.columns.join(', '))} | ${index.isUnique ? 'YES' : 'NO'} | ${index.isPrimary ? 'YES' : 'NO'} | ${escapeMarkdownCell(index.type || '')} |`)
+      }
+      lines.push('')
+    }
+
+    if (schema.foreignKeys.length > 0) {
+      lines.push('### Foreign Keys', '')
+      lines.push('| Name | Columns | References | On Update | On Delete |')
+      lines.push('| --- | --- | --- | --- | --- |')
+      for (const foreignKey of schema.foreignKeys) {
+        lines.push(`| ${escapeMarkdownCell(foreignKey.name)} | ${escapeMarkdownCell(foreignKey.columns.join(', '))} | ${escapeMarkdownCell(`${foreignKey.referencedTable} (${foreignKey.referencedColumns.join(', ')})`)} | ${escapeMarkdownCell(foreignKey.onUpdate || '')} | ${escapeMarkdownCell(foreignKey.onDelete || '')} |`)
+      }
+      lines.push('')
+    }
+  }
+
+  return lines.join('\n')
+}
+
+function escapeMarkdownCell(value: string): string {
+  return String(value).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ')
 }
