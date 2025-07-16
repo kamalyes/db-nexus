@@ -125,6 +125,21 @@
         "category": "%dbNexus.category%"
       },
       {
+        "command": "dbNexus.addColumn",
+        "title": "%dbNexus.addColumn.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.refreshTable",
+        "title": "%dbNexus.refreshTable.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.refreshTableList",
+        "title": "%dbNexus.refreshTableList.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
         "command": "dbNexus.deleteTable",
         "title": "%dbNexus.deleteTable.title%",
         "category": "%dbNexus.category%"
@@ -309,9 +324,19 @@
           "group": "1_table@3"
         },
         {
-          "command": "dbNexus.deleteTable",
+          "command": "dbNexus.addColumn",
           "when": "view == dbNexus.connections && viewItem == table",
           "group": "1_table@4"
+        },
+        {
+          "command": "dbNexus.deleteTable",
+          "when": "view == dbNexus.connections && viewItem == table",
+          "group": "1_table@5"
+        },
+        {
+          "command": "dbNexus.addColumn",
+          "when": "view == dbNexus.connections && viewItem == table.columns",
+          "group": "1_columns@1"
         },
         {
           "command": "dbNexus.showTableList",
@@ -399,12 +424,37 @@
           "group": "4_group@2"
         },
         {
-          "command": "dbNexus.refreshConnections",
+          "command": "dbNexus.refreshTable",
           "when": "view == dbNexus.connections && viewItem == table",
           "group": "5_refresh@1"
         },
         {
-          "command": "dbNexus.refreshConnections",
+          "command": "dbNexus.refreshTable",
+          "when": "view == dbNexus.connections && viewItem == table.columns",
+          "group": "5_refresh@1"
+        },
+        {
+          "command": "dbNexus.refreshTable",
+          "when": "view == dbNexus.connections && viewItem == table.indexes",
+          "group": "5_refresh@1"
+        },
+        {
+          "command": "dbNexus.refreshTable",
+          "when": "view == dbNexus.connections && viewItem == table.foreignKeys",
+          "group": "5_refresh@1"
+        },
+        {
+          "command": "dbNexus.refreshTable",
+          "when": "view == dbNexus.connections && viewItem == table.checks",
+          "group": "5_refresh@1"
+        },
+        {
+          "command": "dbNexus.refreshTable",
+          "when": "view == dbNexus.connections && viewItem == table.triggers",
+          "group": "5_refresh@1"
+        },
+        {
+          "command": "dbNexus.refreshTableList",
           "when": "view == dbNexus.connections && viewItem == tables.group",
           "group": "5_refresh@1"
         }

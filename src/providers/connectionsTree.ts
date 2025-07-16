@@ -35,7 +35,7 @@ type ConnectionTreeNode =
   | PlaceholderNode
   | LoadingNode
 
-type TableDetailGroupKind = 'columns' | 'indexes' | 'foreignKeys' | 'checks' | 'triggers'
+export type TableDetailGroupKind = 'columns' | 'indexes' | 'foreignKeys' | 'checks' | 'triggers'
 
 export class ConnectionNode {
   constructor(
@@ -61,7 +61,7 @@ export class TablesGroupNode {
   ) {}
 }
 
-class TableDetailGroupNode {
+export class TableDetailGroupNode {
   constructor(
     public readonly connectionProfile: DbConnectionProfile,
     public readonly tableName: string,
@@ -173,6 +173,11 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
 
   refresh(): void {
     this.tableSchemaCache.clear()
+    this.onDidChangeTreeDataEmitter.fire(undefined)
+  }
+
+  refreshTable(profile: DbConnectionProfile, tableName: string, scope: SchemaScope): void {
+    this.tableSchemaCache.delete(this.getTableSchemaCacheKey(profile, tableName, scope))
     this.onDidChangeTreeDataEmitter.fire(undefined)
   }
 
@@ -650,19 +655,27 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
       throw new Error('Schema not supported')
     }
 
-    const key = [
-      profile.id,
-      scope.database || '',
-      scope.schema || '',
-      scope.parentName || '',
-      tableName
-    ].join('\u0000')
+    const key = this.getTableSchemaCacheKey(profile, tableName, scope)
 
     if (!this.tableSchemaCache.has(key)) {
       this.tableSchemaCache.set(key, driver.getTableSchema(profile, tableName, scope))
     }
 
     return this.tableSchemaCache.get(key)!
+  }
+
+  private getTableSchemaCacheKey(
+    profile: DbConnectionProfile,
+    tableName: string,
+    scope: SchemaScope
+  ): string {
+    return [
+      profile.id,
+      scope.database || '',
+      scope.schema || '',
+      scope.parentName || '',
+      tableName
+    ].join('\u0000')
   }
 
   private shouldShowDatabaseCatalog(driverId: DatabaseDriverId): boolean {

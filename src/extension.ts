@@ -4,7 +4,7 @@ import { SUPPORTED_DRIVERS } from '@/core/constants'
 import { DatabaseDriverId, DbConnectionProfile, SchemaObject, SchemaScope, TableSchema } from '@/core/types'
 import { DriverRegistry } from '@/drivers/registry'
 import { getCurrentLanguage, initI18n, reloadI18n, t } from '@/i18n'
-import { ConnectionNode, ConnectionsTreeProvider, SchemaNode, TablesGroupNode } from '@/providers/connectionsTree'
+import { ConnectionNode, ConnectionsTreeProvider, SchemaNode, TableDetailGroupNode, TablesGroupNode } from '@/providers/connectionsTree'
 import { ConnectionService } from '@/services/connectionService'
 import { QueryService } from '@/services/queryService'
 import { SecretService } from '@/services/secretService'
@@ -45,12 +45,15 @@ export function activate(context: ExtensionContext): void {
   connectionsTreeProvider = new ConnectionsTreeProvider(connectionService, context.extensionPath)
 
   const resolveNodeContext = async (
-    node: ConnectionNode | SchemaNode | TablesGroupNode | undefined
+    node: ConnectionNode | SchemaNode | TableDetailGroupNode | TablesGroupNode | undefined
   ): Promise<{ profile: DbConnectionProfile; scope: SchemaScope } | undefined> => {
     if (node instanceof ConnectionNode) {
       return { profile: node.profile, scope: {} }
     }
     if (node instanceof TablesGroupNode) {
+      return { profile: node.connectionProfile, scope: node.scope || {} }
+    }
+    if (node instanceof TableDetailGroupNode) {
       return { profile: node.connectionProfile, scope: node.scope || {} }
     }
     if (node instanceof SchemaNode) {
@@ -62,7 +65,7 @@ export function activate(context: ExtensionContext): void {
   }
 
   const resolveTableTarget = async (
-    node: SchemaNode | TablesGroupNode | undefined
+    node: SchemaNode | TableDetailGroupNode | TablesGroupNode | undefined
   ): Promise<TableTarget | undefined> => {
     if (node instanceof SchemaNode && isTableLikeNode(node)) {
       return {
@@ -70,6 +73,15 @@ export function activate(context: ExtensionContext): void {
         scope: node.scope || {},
         tableName: node.schemaObject.name,
         objectType: node.schemaObject.type
+      }
+    }
+
+    if (node instanceof TableDetailGroupNode) {
+      return {
+        profile: node.connectionProfile,
+        scope: node.scope || {},
+        tableName: node.tableName,
+        objectType: 'table'
       }
     }
 
@@ -395,6 +407,88 @@ export function activate(context: ExtensionContext): void {
     }),
     commands.registerCommand('dbNexus.designTable', async (node: SchemaNode | undefined) => {
       await commands.executeCommand('dbNexus.showTableSchema', node)
+    }),
+    commands.registerCommand('dbNexus.addColumn', async (node: SchemaNode | TableDetailGroupNode | undefined) => {
+      const target = await resolveTableTarget(node)
+      if (!target) return
+
+      if (target.objectType !== 'table') {
+        window.showWarningMessage(t('table.onlyTablesCanAddColumn'))
+        return
+      }
+
+      const columnName = await window.showInputBox({
+        prompt: t('table.addColumnName'),
+        placeHolder: 'status'
+      })
+      if (!columnName) return
+
+      const columnType = await window.showInputBox({
+        prompt: t('table.addColumnType'),
+        value: 'VARCHAR(255)'
+      })
+      if (!columnType) return
+
+      const nullableChoice = await window.showQuickPick(
+        [
+          { label: t('table.nullableYes'), nullable: true },
+          { label: t('table.nullableNo'), nullable: false }
+        ],
+        { placeHolder: t('table.addColumnNullable') }
+      )
+      if (!nullableChoice) return
+
+      const defaultValue = await window.showInputBox({
+        prompt: t('table.addColumnDefault'),
+        placeHolder: t('table.defaultExpressionPlaceholder')
+      })
+
+      const qualifiedName = getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)
+      const sql = buildAddColumnSql(
+        target.profile.driverId,
+        qualifiedName,
+        columnName,
+        columnType,
+        nullableChoice.nullable,
+        defaultValue || undefined
+      )
+
+      const mode = await window.showQuickPick(
+        [
+          { label: t('table.runNow'), value: 'run' as const },
+          { label: t('table.openSqlToReview'), value: 'open' as const }
+        ],
+        { placeHolder: t('table.addColumnMode') }
+      )
+      if (!mode) return
+
+      if (mode.value === 'open') {
+        const document = await workspace.openTextDocument({
+          language: 'sql',
+          content: `${sql}\n`
+        })
+        await window.showTextDocument(document)
+        return
+      }
+
+      try {
+        await executeSql(target.profile, sql)
+        connectionsTreeProvider?.refreshTable(target.profile, target.tableName, target.scope)
+        window.showInformationMessage(t('table.columnAdded', columnName))
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error)
+        window.showErrorMessage(t('table.addColumnFailed', message))
+      }
+    }),
+    commands.registerCommand('dbNexus.refreshTable', async (node: SchemaNode | TableDetailGroupNode | undefined) => {
+      const target = await resolveTableTarget(node)
+      if (!target) return
+
+      connectionsTreeProvider?.refreshTable(target.profile, target.tableName, target.scope)
+      window.showInformationMessage(t('table.refreshed', target.tableName))
+    }),
+    commands.registerCommand('dbNexus.refreshTableList', () => {
+      connectionsTreeProvider?.refresh()
     }),
     commands.registerCommand('dbNexus.deleteTable', async (node: SchemaNode | undefined) => {
       const target = await resolveTableTarget(node)
@@ -1163,6 +1257,32 @@ function buildInsertTemplate(
     ');',
     ''
   ].join('\n')
+}
+
+function buildAddColumnSql(
+  driverId: DatabaseDriverId,
+  qualifiedName: string,
+  columnName: string,
+  columnType: string,
+  nullable: boolean,
+  defaultValue?: string
+): string {
+  const parts = [
+    'ALTER TABLE',
+    qualifiedName,
+    'ADD COLUMN',
+    quoteSqlIdentifier(driverId, columnName),
+    columnType.trim()
+  ]
+
+  if (!nullable) {
+    parts.push('NOT NULL')
+  }
+  if (defaultValue && defaultValue.trim()) {
+    parts.push('DEFAULT', defaultValue.trim())
+  }
+
+  return `${parts.join(' ')};`
 }
 
 function sampleSqlValue(type: string, nullable: boolean): string {
