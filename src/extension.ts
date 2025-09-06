@@ -1,10 +1,10 @@
-import { ExtensionContext, ProgressLocation, Uri, commands, window, workspace } from 'vscode'
+import { ExtensionContext, ProgressLocation, Uri, commands, env, window, workspace } from 'vscode'
 import { ConnectionStore } from '@/core/connectionStore'
 import { SUPPORTED_DRIVERS } from '@/core/constants'
 import { DatabaseDriverId, DbConnectionProfile, SchemaObject, SchemaScope, TableSchema } from '@/core/types'
 import { DriverRegistry } from '@/drivers/registry'
 import { getCurrentLanguage, initI18n, reloadI18n, t } from '@/i18n'
-import { ConnectionNode, ConnectionsTreeProvider, SchemaNode, TableDetailGroupNode, TablesGroupNode } from '@/providers/connectionsTree'
+import { ConnectionNode, ConnectionsTreeProvider, FieldNode, IndexNode, SchemaNode, TableDetailGroupNode, TablesGroupNode } from '@/providers/connectionsTree'
 import { ConnectionService } from '@/services/connectionService'
 import { QueryService } from '@/services/queryService'
 import { SecretService } from '@/services/secretService'
@@ -29,6 +29,14 @@ type TableTarget = {
   scope: SchemaScope
   tableName: string
   objectType: SchemaObject['type']
+}
+
+type FieldTarget = {
+  profile: DbConnectionProfile
+  scope: SchemaScope
+  tableName: string
+  columnName: string
+  columnType: string
 }
 
 export function activate(context: ExtensionContext): void {
@@ -65,7 +73,7 @@ export function activate(context: ExtensionContext): void {
   }
 
   const resolveTableTarget = async (
-    node: SchemaNode | TableDetailGroupNode | TablesGroupNode | undefined
+    node: FieldNode | IndexNode | SchemaNode | TableDetailGroupNode | TablesGroupNode | undefined
   ): Promise<TableTarget | undefined> => {
     if (node instanceof SchemaNode && isTableLikeNode(node)) {
       return {
@@ -77,6 +85,15 @@ export function activate(context: ExtensionContext): void {
     }
 
     if (node instanceof TableDetailGroupNode) {
+      return {
+        profile: node.connectionProfile,
+        scope: node.scope || {},
+        tableName: node.tableName,
+        objectType: 'table'
+      }
+    }
+
+    if (node instanceof FieldNode || node instanceof IndexNode) {
       return {
         profile: node.connectionProfile,
         scope: node.scope || {},
@@ -111,6 +128,21 @@ export function activate(context: ExtensionContext): void {
       scope: dbContext.scope,
       tableName: picked.table.name,
       objectType: picked.table.type
+    }
+  }
+
+  const resolveFieldTarget = async (node: FieldNode | undefined): Promise<FieldTarget | undefined> => {
+    if (!node) {
+      window.showWarningMessage(t('table.selectColumn'))
+      return undefined
+    }
+
+    return {
+      profile: node.connectionProfile,
+      scope: node.scope || {},
+      tableName: node.tableName,
+      columnName: node.column.name,
+      columnType: node.column.type
     }
   }
 
@@ -480,7 +512,7 @@ export function activate(context: ExtensionContext): void {
         window.showErrorMessage(t('table.addColumnFailed', message))
       }
     }),
-    commands.registerCommand('dbNexus.refreshTable', async (node: SchemaNode | TableDetailGroupNode | undefined) => {
+    commands.registerCommand('dbNexus.refreshTable', async (node: FieldNode | IndexNode | SchemaNode | TableDetailGroupNode | undefined) => {
       const target = await resolveTableTarget(node)
       if (!target) return
 
@@ -489,6 +521,212 @@ export function activate(context: ExtensionContext): void {
     }),
     commands.registerCommand('dbNexus.refreshTableList', () => {
       connectionsTreeProvider?.refresh()
+    }),
+    commands.registerCommand('dbNexus.renameTable', async (node: SchemaNode | undefined) => {
+      const target = await resolveTableTarget(node)
+      if (!target) return
+
+      if (target.objectType !== 'table') {
+        window.showWarningMessage(t('table.onlyTablesCanRename'))
+        return
+      }
+
+      const newName = await window.showInputBox({
+        prompt: t('table.renameTableName'),
+        value: target.tableName
+      })
+      if (!newName || newName === target.tableName) return
+
+      try {
+        await executeSql(target.profile, buildRenameTableSql(target.profile.driverId, target.scope, target.tableName, newName))
+        connectionsTreeProvider?.refresh()
+        window.showInformationMessage(t('table.renamed', target.tableName, newName))
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error)
+        window.showErrorMessage(t('table.renameFailed', message))
+      }
+    }),
+    commands.registerCommand('dbNexus.truncateTable', async (node: SchemaNode | undefined) => {
+      const target = await resolveTableTarget(node)
+      if (!target) return
+
+      if (target.objectType !== 'table') {
+        window.showWarningMessage(t('table.onlyTablesCanTruncate'))
+        return
+      }
+
+      const confirm = await window.showWarningMessage(
+        t('table.truncateConfirm', target.tableName),
+        { modal: true },
+        t('table.truncate')
+      )
+      if (confirm !== t('table.truncate')) return
+
+      try {
+        await executeSql(target.profile, `TRUNCATE TABLE ${getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)}`)
+        window.showInformationMessage(t('table.truncated', target.tableName))
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error)
+        window.showErrorMessage(t('table.truncateFailed', message))
+      }
+    }),
+    commands.registerCommand('dbNexus.copyTableName', async (node: SchemaNode | undefined) => {
+      const target = await resolveTableTarget(node)
+      if (!target) return
+      await env.clipboard.writeText(getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName))
+      window.showInformationMessage(t('table.copied'))
+    }),
+    commands.registerCommand('dbNexus.copySelectSql', async (node: SchemaNode | undefined) => {
+      const target = await resolveTableTarget(node)
+      if (!target) return
+      const sql = `SELECT * FROM ${getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)} LIMIT 100;`
+      await env.clipboard.writeText(sql)
+      window.showInformationMessage(t('table.copied'))
+    }),
+    commands.registerCommand('dbNexus.renameColumn', async (node: FieldNode | undefined) => {
+      const target = await resolveFieldTarget(node)
+      if (!target) return
+
+      const newName = await window.showInputBox({
+        prompt: t('table.renameColumnName'),
+        value: target.columnName
+      })
+      if (!newName || newName === target.columnName) return
+
+      const qualifiedName = getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)
+      const sql = buildRenameColumnSql(target.profile.driverId, qualifiedName, target.columnName, newName, target.columnType)
+
+      const mode = await window.showQuickPick(
+        [
+          { label: t('table.runNow'), value: 'run' as const },
+          { label: t('table.openSqlToReview'), value: 'open' as const }
+        ],
+        { placeHolder: t('table.renameColumnMode') }
+      )
+      if (!mode) return
+
+      if (mode.value === 'open') {
+        const document = await workspace.openTextDocument({ language: 'sql', content: `${sql}\n` })
+        await window.showTextDocument(document)
+        return
+      }
+
+      try {
+        await executeSql(target.profile, sql)
+        connectionsTreeProvider?.refreshTable(target.profile, target.tableName, target.scope)
+        window.showInformationMessage(t('table.columnRenamed', target.columnName, newName))
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error)
+        window.showErrorMessage(t('table.renameColumnFailed', message))
+      }
+    }),
+    commands.registerCommand('dbNexus.dropColumn', async (node: FieldNode | undefined) => {
+      const target = await resolveFieldTarget(node)
+      if (!target) return
+
+      const confirm = await window.showWarningMessage(
+        t('table.dropColumnConfirm', target.columnName, target.tableName),
+        { modal: true },
+        t('common.delete')
+      )
+      if (confirm !== t('common.delete')) return
+
+      try {
+        const qualifiedName = getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)
+        await executeSql(target.profile, `ALTER TABLE ${qualifiedName} DROP COLUMN ${quoteSqlIdentifier(target.profile.driverId, target.columnName)}`)
+        connectionsTreeProvider?.refreshTable(target.profile, target.tableName, target.scope)
+        window.showInformationMessage(t('table.columnDropped', target.columnName))
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error)
+        window.showErrorMessage(t('table.dropColumnFailed', message))
+      }
+    }),
+    commands.registerCommand('dbNexus.copyColumnName', async (node: FieldNode | undefined) => {
+      const target = await resolveFieldTarget(node)
+      if (!target) return
+      await env.clipboard.writeText(quoteSqlIdentifier(target.profile.driverId, target.columnName))
+      window.showInformationMessage(t('table.copied'))
+    }),
+    commands.registerCommand('dbNexus.createIndex', async (node: SchemaNode | TableDetailGroupNode | undefined) => {
+      const target = await resolveTableTarget(node)
+      if (!target) return
+
+      if (target.objectType !== 'table') {
+        window.showWarningMessage(t('table.onlyTablesCanCreateIndex'))
+        return
+      }
+
+      const columnsText = await window.showInputBox({
+        prompt: t('table.indexColumns'),
+        placeHolder: 'column_a, column_b'
+      })
+      if (!columnsText) return
+
+      const columns = columnsText.split(',').map(column => column.trim()).filter(Boolean)
+      if (columns.length === 0) return
+
+      const indexName = await window.showInputBox({
+        prompt: t('table.indexNamePrompt'),
+        value: `idx_${target.tableName}_${columns.join('_')}`
+      })
+      if (!indexName) return
+
+      const uniqueChoice = await window.showQuickPick(
+        [
+          { label: t('table.indexNormal'), unique: false },
+          { label: t('table.indexUnique'), unique: true }
+        ],
+        { placeHolder: t('table.indexTypePrompt') }
+      )
+      if (!uniqueChoice) return
+
+      const sql = buildCreateIndexSql(
+        target.profile.driverId,
+        indexName,
+        target.scope,
+        target.tableName,
+        columns,
+        uniqueChoice.unique
+      )
+
+      try {
+        await executeSql(target.profile, sql)
+        connectionsTreeProvider?.refreshTable(target.profile, target.tableName, target.scope)
+        window.showInformationMessage(t('table.indexCreated', indexName))
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error)
+        window.showErrorMessage(t('table.createIndexFailed', message))
+      }
+    }),
+    commands.registerCommand('dbNexus.dropIndex', async (node: IndexNode | undefined) => {
+      if (!node) {
+        window.showWarningMessage(t('table.selectIndex'))
+        return
+      }
+
+      const confirm = await window.showWarningMessage(
+        t('table.dropIndexConfirm', node.index.name),
+        { modal: true },
+        t('common.delete')
+      )
+      if (confirm !== t('common.delete')) return
+
+      try {
+        await executeSql(node.connectionProfile, buildDropIndexSql(node.connectionProfile.driverId, node.scope, node.tableName, node.index.name))
+        connectionsTreeProvider?.refreshTable(node.connectionProfile, node.tableName, node.scope)
+        window.showInformationMessage(t('table.indexDropped', node.index.name))
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error)
+        window.showErrorMessage(t('table.dropIndexFailed', message))
+      }
+    }),
+    commands.registerCommand('dbNexus.copyIndexName', async (node: IndexNode | undefined) => {
+      if (!node) {
+        window.showWarningMessage(t('table.selectIndex'))
+        return
+      }
+      await env.clipboard.writeText(quoteSqlIdentifier(node.connectionProfile.driverId, node.index.name))
+      window.showInformationMessage(t('table.copied'))
     }),
     commands.registerCommand('dbNexus.deleteTable', async (node: SchemaNode | undefined) => {
       const target = await resolveTableTarget(node)
@@ -1283,6 +1521,80 @@ function buildAddColumnSql(
   }
 
   return `${parts.join(' ')};`
+}
+
+function buildRenameTableSql(
+  driverId: DatabaseDriverId,
+  scope: SchemaScope,
+  oldName: string,
+  newName: string
+): string {
+  const oldQualifiedName = getQualifiedObjectName(driverId, scope, oldName)
+  if (driverId === 'mysql' || driverId === 'mariadb') {
+    const newQualifiedName = getQualifiedObjectName(driverId, scope, newName)
+    return `RENAME TABLE ${oldQualifiedName} TO ${newQualifiedName};`
+  }
+
+  return `ALTER TABLE ${oldQualifiedName} RENAME TO ${quoteSqlIdentifier(driverId, newName)};`
+}
+
+function buildRenameColumnSql(
+  driverId: DatabaseDriverId,
+  qualifiedName: string,
+  oldName: string,
+  newName: string,
+  columnType: string
+): string {
+  if (driverId === 'mysql' || driverId === 'mariadb') {
+    return [
+      'ALTER TABLE',
+      qualifiedName,
+      'CHANGE COLUMN',
+      quoteSqlIdentifier(driverId, oldName),
+      quoteSqlIdentifier(driverId, newName),
+      columnType,
+      ';'
+    ].join(' ')
+  }
+
+  return `ALTER TABLE ${qualifiedName} RENAME COLUMN ${quoteSqlIdentifier(driverId, oldName)} TO ${quoteSqlIdentifier(driverId, newName)};`
+}
+
+function buildCreateIndexSql(
+  driverId: DatabaseDriverId,
+  indexName: string,
+  scope: SchemaScope,
+  tableName: string,
+  columns: string[],
+  unique: boolean
+): string {
+  const qualifiedTableName = getQualifiedObjectName(driverId, scope, tableName)
+  const columnList = columns.map(column => quoteSqlIdentifier(driverId, column)).join(', ')
+  const uniqueKeyword = unique ? 'UNIQUE ' : ''
+  return `CREATE ${uniqueKeyword}INDEX ${quoteSqlIdentifier(driverId, indexName)} ON ${qualifiedTableName} (${columnList});`
+}
+
+function buildDropIndexSql(
+  driverId: DatabaseDriverId,
+  scope: SchemaScope,
+  tableName: string,
+  indexName: string
+): string {
+  if (driverId === 'mysql' || driverId === 'mariadb') {
+    return `DROP INDEX ${quoteSqlIdentifier(driverId, indexName)} ON ${getQualifiedObjectName(driverId, scope, tableName)};`
+  }
+
+  const indexParts: string[] = []
+  if (driverId !== 'sqlite' && driverId !== 'duckdb') {
+    if (scope.schema) {
+      indexParts.push(scope.schema)
+    } else if (scope.database) {
+      indexParts.push(scope.database)
+    }
+  }
+  indexParts.push(indexName)
+
+  return `DROP INDEX ${indexParts.map(part => quoteSqlIdentifier(driverId, part)).join('.')};`
 }
 
 function sampleSqlValue(type: string, nullable: boolean): string {

@@ -110,9 +110,12 @@ export class FieldNode {
   }
 }
 
-class IndexNode {
+export class IndexNode {
   constructor(
-    public readonly index: TableIndex
+    public readonly connectionProfile: DbConnectionProfile,
+    public readonly tableName: string,
+    public readonly index: TableIndex,
+    public readonly scope: SchemaScope = {}
   ) {}
 }
 
@@ -573,7 +576,7 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
 
       if (node.kind === 'indexes') {
         return schema.indexes.length > 0
-          ? schema.indexes.map(index => new IndexNode(index))
+          ? schema.indexes.map(index => new IndexNode(node.connectionProfile, node.tableName, index, node.scope))
           : [new PlaceholderNode(t('table.noIndexes'))]
       }
 

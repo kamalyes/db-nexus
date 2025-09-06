@@ -140,6 +140,56 @@
         "category": "%dbNexus.category%"
       },
       {
+        "command": "dbNexus.renameTable",
+        "title": "%dbNexus.renameTable.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.truncateTable",
+        "title": "%dbNexus.truncateTable.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.copyTableName",
+        "title": "%dbNexus.copyTableName.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.copySelectSql",
+        "title": "%dbNexus.copySelectSql.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.renameColumn",
+        "title": "%dbNexus.renameColumn.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.dropColumn",
+        "title": "%dbNexus.dropColumn.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.copyColumnName",
+        "title": "%dbNexus.copyColumnName.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.createIndex",
+        "title": "%dbNexus.createIndex.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.dropIndex",
+        "title": "%dbNexus.dropIndex.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.copyIndexName",
+        "title": "%dbNexus.copyIndexName.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
         "command": "dbNexus.deleteTable",
         "title": "%dbNexus.deleteTable.title%",
         "category": "%dbNexus.category%"
@@ -319,24 +369,84 @@
           "group": "1_table@2"
         },
         {
-          "command": "dbNexus.createTable",
+          "command": "dbNexus.showDDL",
           "when": "view == dbNexus.connections && viewItem == table",
           "group": "1_table@3"
         },
         {
-          "command": "dbNexus.addColumn",
+          "command": "dbNexus.createTable",
           "when": "view == dbNexus.connections && viewItem == table",
           "group": "1_table@4"
         },
         {
-          "command": "dbNexus.deleteTable",
+          "command": "dbNexus.addColumn",
           "when": "view == dbNexus.connections && viewItem == table",
           "group": "1_table@5"
+        },
+        {
+          "command": "dbNexus.createIndex",
+          "when": "view == dbNexus.connections && viewItem == table",
+          "group": "1_table@6"
+        },
+        {
+          "command": "dbNexus.renameTable",
+          "when": "view == dbNexus.connections && viewItem == table",
+          "group": "1_table@7"
+        },
+        {
+          "command": "dbNexus.deleteTable",
+          "when": "view == dbNexus.connections && viewItem == table",
+          "group": "1_table@8"
+        },
+        {
+          "command": "dbNexus.truncateTable",
+          "when": "view == dbNexus.connections && viewItem == table",
+          "group": "1_table@9"
         },
         {
           "command": "dbNexus.addColumn",
           "when": "view == dbNexus.connections && viewItem == table.columns",
           "group": "1_columns@1"
+        },
+        {
+          "command": "dbNexus.createIndex",
+          "when": "view == dbNexus.connections && viewItem == table.indexes",
+          "group": "1_indexes@1"
+        },
+        {
+          "command": "dbNexus.copyTableName",
+          "when": "view == dbNexus.connections && viewItem == table",
+          "group": "2_copy@1"
+        },
+        {
+          "command": "dbNexus.copySelectSql",
+          "when": "view == dbNexus.connections && viewItem == table",
+          "group": "2_copy@2"
+        },
+        {
+          "command": "dbNexus.copyColumnName",
+          "when": "view == dbNexus.connections && viewItem == field",
+          "group": "2_copy@1"
+        },
+        {
+          "command": "dbNexus.renameColumn",
+          "when": "view == dbNexus.connections && viewItem == field",
+          "group": "3_column@1"
+        },
+        {
+          "command": "dbNexus.dropColumn",
+          "when": "view == dbNexus.connections && viewItem == field",
+          "group": "3_column@2"
+        },
+        {
+          "command": "dbNexus.copyIndexName",
+          "when": "view == dbNexus.connections && viewItem == index",
+          "group": "2_copy@1"
+        },
+        {
+          "command": "dbNexus.dropIndex",
+          "when": "view == dbNexus.connections && viewItem == index",
+          "group": "3_index@1"
         },
         {
           "command": "dbNexus.showTableList",
@@ -426,6 +536,16 @@
         {
           "command": "dbNexus.refreshTable",
           "when": "view == dbNexus.connections && viewItem == table",
+          "group": "5_refresh@1"
+        },
+        {
+          "command": "dbNexus.refreshTable",
+          "when": "view == dbNexus.connections && viewItem == field",
+          "group": "5_refresh@1"
+        },
+        {
+          "command": "dbNexus.refreshTable",
+          "when": "view == dbNexus.connections && viewItem == index",
           "group": "5_refresh@1"
         },
         {
