@@ -6,6 +6,7 @@ import { DriverRegistry } from '@/drivers/registry'
 import { getCurrentLanguage, initI18n, reloadI18n, t } from '@/i18n'
 import { ConnectionNode, ConnectionsTreeProvider, FieldNode, IndexNode, SchemaNode, TableDetailGroupNode, TablesGroupNode } from '@/providers/connectionsTree'
 import { ConnectionService } from '@/services/connectionService'
+import { connectionStatusManager } from '@/services/connectionStatusManager'
 import { QueryService } from '@/services/queryService'
 import { SecretService } from '@/services/secretService'
 import { QueryHistoryService } from '@/services/queryHistoryService'
@@ -287,8 +288,13 @@ export function activate(context: ExtensionContext): void {
       )
       if (confirm !== t('common.delete')) return
 
+      const driver = driverRegistry.getDriver(profile.driverId)
+      if (driver.dispose) {
+        await driver.dispose(profile.id)
+      }
       await connectionStore.remove(profile.id)
       await SecretService.getInstance().deletePassword(profile.id)
+      connectionStatusManager.clearStatus(profile.id)
       connectionsTreeProvider?.refresh()
       window.showInformationMessage(t('connection.deleted', profile.name))
     }),
@@ -1272,10 +1278,15 @@ export function activate(context: ExtensionContext): void {
       )
     }),
     workspace.onDidChangeConfiguration(event => {
-      if (!event.affectsConfiguration('dbNexus.displayLanguage')) return
-      reloadI18n()
-      connectionsTreeProvider?.refresh()
-      window.showInformationMessage(t('i18n.languageChanged', getCurrentLanguage()))
+      if (event.affectsConfiguration('dbNexus.connections')) {
+        connectionsTreeProvider?.refresh()
+      }
+
+      if (event.affectsConfiguration('dbNexus.displayLanguage')) {
+        reloadI18n()
+        connectionsTreeProvider?.refresh()
+        window.showInformationMessage(t('i18n.languageChanged', getCurrentLanguage()))
+      }
     })
   )
 }

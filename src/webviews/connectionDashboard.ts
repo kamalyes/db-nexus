@@ -179,8 +179,13 @@ export class ConnectionDashboard {
     )
 
     if (confirm === t('common.delete')) {
+      const driver = ConnectionDashboard._driverRegistry?.getDriver(profile.driverId)
+      if (driver?.dispose) {
+        await driver.dispose(id)
+      }
       await store.remove(id)
       connectionStatusManager.clearStatus(id)
+      await commands.executeCommand('dbNexus.refreshConnections')
       await this._refresh()
       window.showInformationMessage(t('connection.deleted', profile.name))
     }
@@ -604,6 +609,7 @@ export class ConnectionDashboard {
     const isEdit = !!existingProfile
     const title = isEdit ? t('form.editConnection') : t('form.addConnection')
     const selectedDriver = existingProfile?.driverId || 'postgresql'
+    const selectedDriverName = SUPPORTED_DRIVERS.find(driver => driver.id === selectedDriver)?.displayName || selectedDriver
     
     const driverIcons = SUPPORTED_DRIVERS
       .filter(d => d.implemented)
@@ -758,7 +764,7 @@ export class ConnectionDashboard {
 
       <div class="form-group">
         <label class="form-label">${t('form.connectionName')} <span class="required">*</span></label>
-        <input type="text" id="name" class="form-input" value="${this._escapeHtml(existingProfile?.name || '')}" required placeholder="My Database">
+        <input type="text" id="name" class="form-input" value="${this._escapeHtml(existingProfile?.name || selectedDriverName)}" required placeholder="My Database">
       </div>
 
       <div class="form-group">
@@ -820,14 +826,29 @@ export class ConnectionDashboard {
   <script>
     const vscode = acquireVsCodeApi();
     const fileDrivers = ['sqlite', 'duckdb'];
+    const isEdit = ${JSON.stringify(isEdit)};
+    const driverNames = ${JSON.stringify(Object.fromEntries(SUPPORTED_DRIVERS.map(driver => [driver.id, driver.displayName])))};
+    let nameWasEdited = isEdit;
+
+    document.getElementById('name').addEventListener('input', function() {
+      nameWasEdited = true;
+    });
 
     function selectDriver(driverId) {
+      const previousDriverId = document.getElementById('driverId').value;
       document.getElementById('driverId').value = driverId;
       
       document.querySelectorAll('.driver-card').forEach(card => {
         card.classList.remove('selected');
       });
       document.querySelector('.driver-card[data-driver="' + driverId + '"]').classList.add('selected');
+
+      const nameInput = document.getElementById('name');
+      const previousDriverName = driverNames[previousDriverId] || previousDriverId;
+      if (!isEdit && (!nameWasEdited || nameInput.value === previousDriverName)) {
+        nameInput.value = driverNames[driverId] || driverId;
+        nameWasEdited = false;
+      }
       
       updateDriverFields();
     }

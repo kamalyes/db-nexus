@@ -35,6 +35,10 @@ class ConnectionStatusManager {
 
   clearStatus(profileId: string): void {
     this._statuses.delete(profileId)
+    this._onDidChangeStatusEmitter.fire({
+      profileId,
+      status: 'disconnected'
+    })
   }
 
   isConnected(profileId: string): boolean {
