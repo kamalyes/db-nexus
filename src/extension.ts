@@ -151,6 +151,73 @@ export function activate(context: ExtensionContext): void {
     return driverRegistry.getDriver(profile.driverId).executeQuery(profile, { sql })
   }
 
+  const openSqlDocument = async (sql: string): Promise<void> => {
+    const document = await workspace.openTextDocument({
+      language: 'sql',
+      content: sql.endsWith('\n') ? sql : `${sql}\n`
+    })
+    await window.showTextDocument(document)
+  }
+
+  const openInsertTemplate = async (
+    node: FieldNode | IndexNode | SchemaNode | TableDetailGroupNode | TablesGroupNode | undefined
+  ): Promise<void> => {
+    const target = await resolveTableTarget(node)
+    if (!target) return
+
+    if (target.objectType !== 'table') {
+      window.showWarningMessage(t('table.onlyTablesCanGenerateMutation'))
+      return
+    }
+
+    const driver = driverRegistry.getDriver(target.profile.driverId)
+    if (!driver?.getTableSchema) {
+      window.showErrorMessage(t('table.schemaNotSupported'))
+      return
+    }
+
+    try {
+      const schema = await driver.getTableSchema(target.profile, target.tableName, target.scope)
+      const qualifiedName = getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)
+      const columns = schema.columns.filter(column => !column.isAutoIncrement)
+      await openSqlDocument(buildInsertTemplate(target.profile.driverId, qualifiedName, columns))
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      window.showErrorMessage(t('table.schemaFailed', message))
+    }
+  }
+
+  const openMutationTemplate = async (
+    node: FieldNode | IndexNode | SchemaNode | TableDetailGroupNode | TablesGroupNode | undefined,
+    kind: 'update' | 'delete'
+  ): Promise<void> => {
+    const target = await resolveTableTarget(node)
+    if (!target) return
+
+    if (target.objectType !== 'table') {
+      window.showWarningMessage(t('table.onlyTablesCanGenerateMutation'))
+      return
+    }
+
+    const driver = driverRegistry.getDriver(target.profile.driverId)
+    if (!driver?.getTableSchema) {
+      window.showErrorMessage(t('table.schemaNotSupported'))
+      return
+    }
+
+    try {
+      const schema = await driver.getTableSchema(target.profile, target.tableName, target.scope)
+      const qualifiedName = getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)
+      const sql = kind === 'update'
+        ? buildUpdateTemplate(target.profile.driverId, qualifiedName, schema.columns)
+        : buildDeleteTemplate(target.profile.driverId, qualifiedName, schema.columns)
+      await openSqlDocument(sql)
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      window.showErrorMessage(t('table.schemaFailed', message))
+    }
+  }
+
   const exportTable = async (target: TableTarget, format: 'csv' | 'json' | 'sql'): Promise<void> => {
     try {
       const qualifiedName = getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)
@@ -585,9 +652,41 @@ export function activate(context: ExtensionContext): void {
     commands.registerCommand('dbNexus.copySelectSql', async (node: SchemaNode | undefined) => {
       const target = await resolveTableTarget(node)
       if (!target) return
-      const sql = `SELECT * FROM ${getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)} LIMIT 100;`
+      const sql = buildSelectSql(target.profile.driverId, target.scope, target.tableName)
       await env.clipboard.writeText(sql)
       window.showInformationMessage(t('table.copied'))
+    }),
+    commands.registerCommand('dbNexus.openSelectSql', async (node: FieldNode | IndexNode | SchemaNode | TableDetailGroupNode | TablesGroupNode | undefined) => {
+      const target = await resolveTableTarget(node)
+      if (!target) return
+
+      await openSqlDocument(buildSelectTemplate(target.profile.driverId, target.scope, target.tableName))
+    }),
+    commands.registerCommand('dbNexus.openInsertSql', async (node: FieldNode | IndexNode | SchemaNode | TableDetailGroupNode | TablesGroupNode | undefined) => {
+      await openInsertTemplate(node)
+    }),
+    commands.registerCommand('dbNexus.openUpdateSql', async (node: FieldNode | IndexNode | SchemaNode | TableDetailGroupNode | TablesGroupNode | undefined) => {
+      await openMutationTemplate(node, 'update')
+    }),
+    commands.registerCommand('dbNexus.openDeleteSql', async (node: FieldNode | IndexNode | SchemaNode | TableDetailGroupNode | TablesGroupNode | undefined) => {
+      await openMutationTemplate(node, 'delete')
+    }),
+    commands.registerCommand('dbNexus.countRows', async (node: FieldNode | IndexNode | SchemaNode | TableDetailGroupNode | TablesGroupNode | undefined) => {
+      const target = await resolveTableTarget(node)
+      if (!target) return
+
+      const sql = `SELECT COUNT(*) AS row_count FROM ${getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)};`
+
+      try {
+        const result = await executeSql(target.profile, sql)
+        ResultPanel.show(context, t('query.resultTitle', `${target.profile.name} / ${target.tableName}`), result)
+        await QueryHistoryService.getInstance().add(sql, target.profile, result)
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error)
+        outputChannel.appendLine(message)
+        window.showErrorMessage(t('query.failed', message))
+        await QueryHistoryService.getInstance().add(sql, target.profile, error instanceof Error ? error : new Error(message))
+      }
     }),
     commands.registerCommand('dbNexus.renameColumn', async (node: FieldNode | undefined) => {
       const target = await resolveFieldTarget(node)
@@ -798,28 +897,7 @@ export function activate(context: ExtensionContext): void {
       }
     }),
     commands.registerCommand('dbNexus.generateData', async (node: SchemaNode | TablesGroupNode | undefined) => {
-      const target = await resolveTableTarget(node)
-      if (!target) return
-
-      const driver = driverRegistry.getDriver(target.profile.driverId)
-      if (!driver?.getTableSchema) {
-        window.showErrorMessage(t('table.schemaNotSupported'))
-        return
-      }
-
-      try {
-        const schema = await driver.getTableSchema(target.profile, target.tableName, target.scope)
-        const qualifiedName = getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)
-        const columns = schema.columns.filter(column => !column.isAutoIncrement)
-        const document = await workspace.openTextDocument({
-          language: 'sql',
-          content: buildInsertTemplate(target.profile.driverId, qualifiedName, columns)
-        })
-        await window.showTextDocument(document)
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error)
-        window.showErrorMessage(t('table.schemaFailed', message))
-      }
+      await openInsertTemplate(node)
     }),
     commands.registerCommand('dbNexus.runSqlFile', async (node: ConnectionNode | SchemaNode | TablesGroupNode | undefined) => {
       const dbContext = await resolveNodeContext(node)
@@ -1506,6 +1584,118 @@ function buildInsertTemplate(
     ');',
     ''
   ].join('\n')
+}
+
+function buildSelectTemplate(
+  driverId: DatabaseDriverId,
+  scope: SchemaScope,
+  tableName: string
+): string {
+  const qualifiedName = getQualifiedObjectName(driverId, scope, tableName)
+  if (driverId === 'sqlserver') {
+    return [
+      'SELECT TOP (100)',
+      '  *',
+      `FROM ${qualifiedName};`,
+      ''
+    ].join('\n')
+  }
+
+  if (driverId === 'oracle') {
+    return [
+      'SELECT',
+      '  *',
+      `FROM ${qualifiedName}`,
+      'FETCH FIRST 100 ROWS ONLY;',
+      ''
+    ].join('\n')
+  }
+
+  return [
+    'SELECT',
+    '  *',
+    `FROM ${qualifiedName}`,
+    'LIMIT 100;',
+    ''
+  ].join('\n')
+}
+
+function buildSelectSql(
+  driverId: DatabaseDriverId,
+  scope: SchemaScope,
+  tableName: string
+): string {
+  return buildSelectTemplate(driverId, scope, tableName).trim()
+}
+
+function buildUpdateTemplate(
+  driverId: DatabaseDriverId,
+  qualifiedName: string,
+  columns: TableSchema['columns']
+): string {
+  const writableColumns = columns.filter(column => !column.isPrimaryKey && !column.isAutoIncrement)
+  const setColumns = writableColumns.length > 0 ? writableColumns : columns.slice(0, 1)
+  const whereColumns = getPredicateColumns(columns)
+
+  if (setColumns.length === 0) {
+    return [
+      `UPDATE ${qualifiedName}`,
+      'SET',
+      '  -- column_name = value',
+      'WHERE 1 = 0;',
+      ''
+    ].join('\n')
+  }
+
+  return [
+    `UPDATE ${qualifiedName}`,
+    'SET',
+    setColumns
+      .map((column, index) => {
+        const suffix = index === setColumns.length - 1 ? '' : ','
+        return `  ${quoteSqlIdentifier(driverId, column.name)} = ${sampleSqlValue(column.type, column.nullable)}${suffix}`
+      })
+      .join('\n'),
+    'WHERE',
+    buildWhereClause(driverId, whereColumns),
+    ''
+  ].join('\n')
+}
+
+function buildDeleteTemplate(
+  driverId: DatabaseDriverId,
+  qualifiedName: string,
+  columns: TableSchema['columns']
+): string {
+  return [
+    `DELETE FROM ${qualifiedName}`,
+    'WHERE',
+    buildWhereClause(driverId, getPredicateColumns(columns)),
+    ''
+  ].join('\n')
+}
+
+function getPredicateColumns(columns: TableSchema['columns']): TableSchema['columns'] {
+  const primaryColumns = columns.filter(column => column.isPrimaryKey)
+  if (primaryColumns.length > 0) {
+    return primaryColumns
+  }
+
+  return columns.length > 0 ? [columns[0]] : []
+}
+
+function buildWhereClause(driverId: DatabaseDriverId, columns: TableSchema['columns']): string {
+  if (columns.length === 0) {
+    return '  1 = 0;'
+  }
+
+  return columns
+    .map((column, index) => {
+      const prefix = index === 0 ? '  ' : '  AND '
+      const suffix = index === columns.length - 1 ? ';' : ''
+      return `${prefix}${quoteSqlIdentifier(driverId, column.name)} = ${sampleSqlValue(column.type, column.nullable)}${suffix}`
+    })
+    .join('\n')
 }
 
 function buildAddColumnSql(

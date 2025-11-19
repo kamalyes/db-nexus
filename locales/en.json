@@ -122,6 +122,7 @@
     "columnDropped": "Column dropped: {0}",
     "dropColumnFailed": "Failed to drop column: {0}",
     "onlyTablesCanCreateIndex": "Indexes can only be created on tables",
+    "onlyTablesCanGenerateMutation": "INSERT, UPDATE, and DELETE SQL can only be generated for tables",
     "indexColumns": "Index columns",
     "indexNamePrompt": "Index name",
     "indexTypePrompt": "Index type",

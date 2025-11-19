@@ -160,6 +160,31 @@
         "category": "%dbNexus.category%"
       },
       {
+        "command": "dbNexus.openSelectSql",
+        "title": "%dbNexus.openSelectSql.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.openInsertSql",
+        "title": "%dbNexus.openInsertSql.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.openUpdateSql",
+        "title": "%dbNexus.openUpdateSql.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.openDeleteSql",
+        "title": "%dbNexus.openDeleteSql.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.countRows",
+        "title": "%dbNexus.countRows.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
         "command": "dbNexus.renameColumn",
         "title": "%dbNexus.renameColumn.title%",
         "category": "%dbNexus.category%"
@@ -359,6 +384,66 @@
           "group": "1_connection@3"
         },
         {
+          "command": "dbNexus.showTableList",
+          "when": "view == dbNexus.connections && viewItem == database",
+          "group": "1_database@1"
+        },
+        {
+          "command": "dbNexus.showTableList",
+          "when": "view == dbNexus.connections && viewItem == schema",
+          "group": "1_database@1"
+        },
+        {
+          "command": "dbNexus.createTable",
+          "when": "view == dbNexus.connections && viewItem == database",
+          "group": "1_database@2"
+        },
+        {
+          "command": "dbNexus.createTable",
+          "when": "view == dbNexus.connections && viewItem == schema",
+          "group": "1_database@2"
+        },
+        {
+          "command": "dbNexus.showDataDictionary",
+          "when": "view == dbNexus.connections && viewItem == database",
+          "group": "2_database@1"
+        },
+        {
+          "command": "dbNexus.showDataDictionary",
+          "when": "view == dbNexus.connections && viewItem == schema",
+          "group": "2_database@1"
+        },
+        {
+          "command": "dbNexus.runSqlFile",
+          "when": "view == dbNexus.connections && viewItem == database",
+          "group": "2_database@2"
+        },
+        {
+          "command": "dbNexus.runSqlFile",
+          "when": "view == dbNexus.connections && viewItem == schema",
+          "group": "2_database@2"
+        },
+        {
+          "command": "dbNexus.searchDatabase",
+          "when": "view == dbNexus.connections && viewItem == database",
+          "group": "2_database@3"
+        },
+        {
+          "command": "dbNexus.searchDatabase",
+          "when": "view == dbNexus.connections && viewItem == schema",
+          "group": "2_database@3"
+        },
+        {
+          "command": "dbNexus.refreshTableList",
+          "when": "view == dbNexus.connections && viewItem == database",
+          "group": "5_refresh@1"
+        },
+        {
+          "command": "dbNexus.refreshTableList",
+          "when": "view == dbNexus.connections && viewItem == schema",
+          "group": "5_refresh@1"
+        },
+        {
           "command": "dbNexus.openTable",
           "when": "view == dbNexus.connections && viewItem == table",
           "group": "1_table@1"
@@ -422,6 +507,31 @@
           "command": "dbNexus.copySelectSql",
           "when": "view == dbNexus.connections && viewItem == table",
           "group": "2_copy@2"
+        },
+        {
+          "command": "dbNexus.openSelectSql",
+          "when": "view == dbNexus.connections && viewItem == table",
+          "group": "2_query@1"
+        },
+        {
+          "command": "dbNexus.openInsertSql",
+          "when": "view == dbNexus.connections && viewItem == table",
+          "group": "2_query@2"
+        },
+        {
+          "command": "dbNexus.openUpdateSql",
+          "when": "view == dbNexus.connections && viewItem == table",
+          "group": "2_query@3"
+        },
+        {
+          "command": "dbNexus.openDeleteSql",
+          "when": "view == dbNexus.connections && viewItem == table",
+          "group": "2_query@4"
+        },
+        {
+          "command": "dbNexus.countRows",
+          "when": "view == dbNexus.connections && viewItem == table",
+          "group": "2_query@5"
         },
         {
           "command": "dbNexus.copyColumnName",

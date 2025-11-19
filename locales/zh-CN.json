@@ -125,6 +125,7 @@
     "columnDropped": "字段已删除：{0}",
     "dropColumnFailed": "删除字段失败：{0}",
     "onlyTablesCanCreateIndex": "只有表可以新建索引",
+    "onlyTablesCanGenerateMutation": "\u53ea\u6709\u8868\u53ef\u4ee5\u751f\u6210 INSERT\u3001UPDATE \u548c DELETE SQL",
     "indexColumns": "索引字段",
     "indexNamePrompt": "索引名",
     "indexTypePrompt": "索引类型",
