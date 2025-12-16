@@ -267,6 +267,39 @@ export class MySQLDriver implements DatabaseDriver {
     const pool = await this.getPool(profile)
     const database = scope.database || profile.database
 
+    const [tableRows] = await pool.query(`
+      SELECT
+        ENGINE,
+        TABLE_ROWS,
+        AUTO_INCREMENT,
+        ROW_FORMAT,
+        CREATE_TIME,
+        UPDATE_TIME,
+        CHECK_TIME,
+        DATA_LENGTH,
+        INDEX_LENGTH,
+        MAX_DATA_LENGTH,
+        TABLE_COLLATION,
+        TABLE_COMMENT
+      FROM information_schema.TABLES
+      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+      LIMIT 1
+    `, [database, tableName])
+
+    const tableInfo = Array.isArray(tableRows) && tableRows.length > 0
+      ? tableRows[0] as Record<string, unknown>
+      : {}
+
+    const [versionRows] = await pool.query('SELECT VERSION() AS VERSION')
+    const serverVersion = Array.isArray(versionRows) && versionRows.length > 0
+      ? String((versionRows[0] as Record<string, unknown>).VERSION || '')
+      : ''
+
+    const [sessionRows] = await pool.query("SHOW STATUS LIKE 'Threads_connected'")
+    const activeSessions = Array.isArray(sessionRows) && sessionRows.length > 0
+      ? Number((sessionRows[0] as Record<string, unknown>).Value || 0)
+      : undefined
+
     const [columnsRows] = await pool.query(`
       SELECT 
         c.COLUMN_NAME,
@@ -368,7 +401,24 @@ export class MySQLDriver implements DatabaseDriver {
       name: tableName,
       columns,
       indexes: Array.from(indexMap.values()),
-      foreignKeys: Array.from(fkMap.values())
+      foreignKeys: Array.from(fkMap.values()),
+      comment: String(tableInfo.TABLE_COMMENT || ''),
+      metadata: {
+        engine: stringOrUndefined(tableInfo.ENGINE),
+        tableRows: numberOrUndefined(tableInfo.TABLE_ROWS),
+        autoIncrement: numberOrUndefined(tableInfo.AUTO_INCREMENT),
+        rowFormat: stringOrUndefined(tableInfo.ROW_FORMAT),
+        createTime: stringOrUndefined(tableInfo.CREATE_TIME),
+        updateTime: stringOrUndefined(tableInfo.UPDATE_TIME),
+        checkTime: stringOrUndefined(tableInfo.CHECK_TIME),
+        dataLength: numberOrUndefined(tableInfo.DATA_LENGTH),
+        indexLength: numberOrUndefined(tableInfo.INDEX_LENGTH),
+        maxDataLength: numberOrUndefined(tableInfo.MAX_DATA_LENGTH),
+        tableCollation: stringOrUndefined(tableInfo.TABLE_COLLATION),
+        charset: getCharsetFromCollation(stringOrUndefined(tableInfo.TABLE_COLLATION)),
+        serverVersion,
+        activeSessions
+      }
     }
   }
 
@@ -557,4 +607,28 @@ export class MySQLDriver implements DatabaseDriver {
         throw new Error(`Unsupported object type: ${objectType}`)
     }
   }
+}
+
+function stringOrUndefined(value: unknown): string | undefined {
+  if (value === null || value === undefined || value === '') {
+    return undefined
+  }
+  return String(value)
+}
+
+function numberOrUndefined(value: unknown): number | undefined {
+  if (value === null || value === undefined || value === '') {
+    return undefined
+  }
+
+  const numberValue = Number(value)
+  return Number.isFinite(numberValue) ? numberValue : undefined
+}
+
+function getCharsetFromCollation(collation?: string): string | undefined {
+  if (!collation) {
+    return undefined
+  }
+
+  return collation.split('_')[0] || undefined
 }

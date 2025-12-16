@@ -443,7 +443,13 @@ export function activate(context: ExtensionContext): void {
 
       try {
         const schema = await driver.getTableSchema(profile, node.schemaObject.name, node.scope || {})
-        TableSchemaPanel.show(context, t('table.schemaTitle', schema.name), schema)
+        TableSchemaPanel.show(context, t('table.schemaTitle', schema.name), schema, {
+          profile,
+          scope: node.scope || {},
+          objectType: node.schemaObject.type,
+          rowCount: node.schemaObject.rowCount,
+          description: node.schemaObject.description
+        })
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error)
         window.showErrorMessage(t('table.schemaFailed', message))

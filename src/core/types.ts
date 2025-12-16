@@ -177,6 +177,7 @@ export interface TableSchema {
   indexes: TableIndex[]
   foreignKeys: TableForeignKey[]
   comment?: string
+  metadata?: Record<string, string | number | boolean | null | undefined>
 }
 
 export interface RowChange {
