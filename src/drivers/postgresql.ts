@@ -275,6 +275,69 @@ export class PostgreSQLDriver implements DatabaseDriver {
   async getTableSchema(profile: DbConnectionProfile, tableName: string, scope: SchemaScope): Promise<TableSchema> {
     const pool = await this.getPool(profile)
     const schema = scope.database || 'public'
+    const metadata: TableSchema['metadata'] = {}
+
+    try {
+      const tableInfoResult = await pool.query(`
+        SELECT
+          c.reltuples::bigint AS table_rows,
+          c.relpersistence,
+          c.relkind,
+          pg_get_userbyid(c.relowner) AS owner,
+          obj_description(c.oid, 'pg_class') AS comment,
+          pg_relation_size(c.oid) AS data_length,
+          pg_indexes_size(c.oid) AS index_length,
+          pg_total_relation_size(c.oid) AS total_length
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname = $1 AND n.nspname = $2
+        LIMIT 1
+      `, [tableName, schema])
+
+      const tableInfo = tableInfoResult.rows[0] as Record<string, unknown> | undefined
+      if (tableInfo) {
+        metadata.tableRows = numberOrUndefined(tableInfo.table_rows)
+        metadata.rowFormat = stringOrUndefined(tableInfo.relpersistence)
+        metadata.objectKind = stringOrUndefined(tableInfo.relkind)
+        metadata.owner = stringOrUndefined(tableInfo.owner)
+        metadata.dataLength = numberOrUndefined(tableInfo.data_length)
+        metadata.indexLength = numberOrUndefined(tableInfo.index_length)
+        metadata.totalLength = numberOrUndefined(tableInfo.total_length)
+        metadata.comment = stringOrUndefined(tableInfo.comment)
+      }
+    } catch {
+      // Optional pg_catalog metadata is best-effort; schema browsing should still work without it.
+    }
+
+    try {
+      const versionResult = await pool.query('SHOW server_version')
+      metadata.serverVersion = stringOrUndefined(versionResult.rows[0]?.server_version)
+    } catch {
+      // Ignore optional server metadata failures.
+    }
+
+    try {
+      const databaseResult = await pool.query(`
+        SELECT
+          d.datname,
+          pg_encoding_to_char(d.encoding) AS charset,
+          d.datcollate AS collation,
+          s.numbackends AS active_sessions
+        FROM pg_database d
+        LEFT JOIN pg_stat_database s ON s.datid = d.oid
+        WHERE d.datname = current_database()
+        LIMIT 1
+      `)
+      const databaseInfo = databaseResult.rows[0] as Record<string, unknown> | undefined
+      if (databaseInfo) {
+        metadata.databaseName = stringOrUndefined(databaseInfo.datname)
+        metadata.charset = stringOrUndefined(databaseInfo.charset)
+        metadata.tableCollation = stringOrUndefined(databaseInfo.collation)
+        metadata.activeSessions = numberOrUndefined(databaseInfo.active_sessions)
+      }
+    } catch {
+      // Ignore optional database metadata failures.
+    }
 
     const columnsResult = await pool.query(`
       SELECT 
@@ -389,7 +452,9 @@ export class PostgreSQLDriver implements DatabaseDriver {
       name: tableName,
       columns,
       indexes,
-      foreignKeys: Array.from(fkMap.values())
+      foreignKeys: Array.from(fkMap.values()),
+      comment: stringOrUndefined(metadata.comment),
+      metadata
     }
   }
 
@@ -625,4 +690,20 @@ export class PostgreSQLDriver implements DatabaseDriver {
         throw new Error(`Unsupported object type: ${objectType}`)
     }
   }
+}
+
+function stringOrUndefined(value: unknown): string | undefined {
+  if (value === null || value === undefined || value === '') {
+    return undefined
+  }
+  return String(value)
+}
+
+function numberOrUndefined(value: unknown): number | undefined {
+  if (value === null || value === undefined || value === '') {
+    return undefined
+  }
+
+  const numberValue = Number(value)
+  return Number.isFinite(numberValue) ? numberValue : undefined
 }

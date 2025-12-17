@@ -10,7 +10,11 @@ import {
   QueryResult,
   SchemaObject,
   SchemaObjectType,
-  SchemaScope
+  SchemaScope,
+  TableColumn,
+  TableForeignKey,
+  TableIndex,
+  TableSchema
 } from '@/core/types'
 import { SQL_CAPABILITIES } from '@/core/constants'
 import { DatabaseDriver } from './base'
@@ -160,6 +164,94 @@ export class SQLiteDriver implements DatabaseDriver {
     }
   }
 
+  async getTableSchema(profile: DbConnectionProfile, tableName: string, _scope: SchemaScope): Promise<TableSchema> {
+    const db = await this.getConnection(profile)
+    const quotedTable = quoteSqliteIdentifier(tableName)
+    const tableInfoRows = rowsAsObjects(db.exec(`PRAGMA table_info(${quotedTable})`))
+
+    const columns: TableColumn[] = tableInfoRows.map(row => ({
+      name: String(row.name),
+      type: String(row.type || 'TEXT'),
+      nullable: Number(row.notnull || 0) === 0,
+      defaultValue: row.dflt_value === null || row.dflt_value === undefined ? null : String(row.dflt_value),
+      isPrimaryKey: Number(row.pk || 0) > 0,
+      isAutoIncrement: false,
+      comment: '',
+      position: Number(row.cid || 0) + 1
+    }))
+
+    const indexRows = rowsAsObjects(db.exec(`PRAGMA index_list(${quotedTable})`))
+    const indexes: TableIndex[] = []
+    for (const row of indexRows) {
+      const indexName = String(row.name || '')
+      if (!indexName) continue
+
+      const indexInfoRows = rowsAsObjects(db.exec(`PRAGMA index_info(${quoteSqliteIdentifier(indexName)})`))
+      indexes.push({
+        name: indexName,
+        columns: indexInfoRows.map(indexInfo => String(indexInfo.name || '')).filter(Boolean),
+        isUnique: Number(row.unique || 0) === 1,
+        isPrimary: String(row.origin || '') === 'pk',
+        type: String(row.origin || '') || undefined
+      })
+    }
+
+    const foreignKeyRows = rowsAsObjects(db.exec(`PRAGMA foreign_key_list(${quotedTable})`))
+    const foreignKeyMap = new Map<string, TableForeignKey>()
+    for (const row of foreignKeyRows) {
+      const id = String(row.id || '0')
+      const name = `fk_${tableName}_${id}`
+      if (!foreignKeyMap.has(name)) {
+        foreignKeyMap.set(name, {
+          name,
+          columns: [],
+          referencedTable: String(row.table || ''),
+          referencedColumns: [],
+          onUpdate: String(row.on_update || ''),
+          onDelete: String(row.on_delete || '')
+        })
+      }
+
+      const foreignKey = foreignKeyMap.get(name)!
+      foreignKey.columns.push(String(row.from || ''))
+      foreignKey.referencedColumns.push(String(row.to || ''))
+    }
+
+    const metadata: TableSchema['metadata'] = {
+      engine: 'SQLite',
+      serverVersion: firstValue(db.exec('SELECT sqlite_version() AS version')),
+      charset: firstValue(db.exec('PRAGMA encoding')),
+      schemaVersion: numberOrUndefined(firstValue(db.exec('PRAGMA schema_version'))),
+      userVersion: numberOrUndefined(firstValue(db.exec('PRAGMA user_version'))),
+      pageCount: numberOrUndefined(firstValue(db.exec('PRAGMA page_count'))),
+      pageSize: numberOrUndefined(firstValue(db.exec('PRAGMA page_size'))),
+      freeListCount: numberOrUndefined(firstValue(db.exec('PRAGMA freelist_count'))),
+      journalMode: firstValue(db.exec('PRAGMA journal_mode'))
+    }
+
+    if (typeof metadata.pageCount === 'number' && typeof metadata.pageSize === 'number') {
+      metadata.dataLength = metadata.pageCount * metadata.pageSize
+    }
+
+    if (profile.filePath && fs.existsSync(profile.filePath)) {
+      metadata.databaseSize = fs.statSync(profile.filePath).size
+    }
+
+    try {
+      metadata.tableRows = numberOrUndefined(firstValue(db.exec(`SELECT COUNT(*) AS total FROM ${quotedTable}`)))
+    } catch {
+      // Views or virtual tables may reject COUNT(*) here; keep the rest of the schema usable.
+    }
+
+    return {
+      name: tableName,
+      columns,
+      indexes,
+      foreignKeys: Array.from(foreignKeyMap.values()),
+      metadata
+    }
+  }
+
   async dispose(profileId: string): Promise<void> {
     const db = this.connections.get(profileId)
     if (db) {
@@ -167,4 +259,41 @@ export class SQLiteDriver implements DatabaseDriver {
       this.connections.delete(profileId)
     }
   }
+}
+
+function rowsAsObjects(result: ReturnType<Database['exec']>): Record<string, unknown>[] {
+  if (result.length === 0) {
+    return []
+  }
+
+  const firstResult = result[0]
+  return firstResult.values.map(row => {
+    const object: Record<string, unknown> = {}
+    firstResult.columns.forEach((column, index) => {
+      object[column] = row[index]
+    })
+    return object
+  })
+}
+
+function firstValue(result: ReturnType<Database['exec']>): string | undefined {
+  if (result.length === 0 || result[0].values.length === 0) {
+    return undefined
+  }
+
+  const value = result[0].values[0][0]
+  return value === null || value === undefined || value === '' ? undefined : String(value)
+}
+
+function quoteSqliteIdentifier(identifier: string): string {
+  return `"${String(identifier).replace(/"/g, '""')}"`
+}
+
+function numberOrUndefined(value: unknown): number | undefined {
+  if (value === null || value === undefined || value === '') {
+    return undefined
+  }
+
+  const numberValue = Number(value)
+  return Number.isFinite(numberValue) ? numberValue : undefined
 }

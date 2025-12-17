@@ -158,6 +158,51 @@ export class DuckDBDriver implements DatabaseDriver {
 
   async getTableSchema(profile: DbConnectionProfile, tableName: string, scope: SchemaScope): Promise<TableSchema> {
     const conn = await this.getConnection(profile)
+    const schemaName = scope.schema || scope.database || 'main'
+    const metadata: TableSchema['metadata'] = {
+      engine: 'DuckDB'
+    }
+
+    try {
+      const versionResult = await conn.execute('SELECT version() AS version')
+      metadata.serverVersion = firstDuckValue(versionResult)
+    } catch {
+      // Optional metadata only.
+    }
+
+    try {
+      const tableInfoResult = await conn.execute(`
+        SELECT
+          database_name,
+          schema_name,
+          estimated_size,
+          column_count,
+          index_count,
+          check_constraint_count,
+          sql
+        FROM duckdb_tables()
+        WHERE table_name = '${escapeSqlLiteral(tableName)}'
+          AND schema_name = '${escapeSqlLiteral(schemaName)}'
+        LIMIT 1
+      `)
+      const tableInfo = firstDuckRow(tableInfoResult)
+      if (tableInfo) {
+        metadata.databaseName = stringOrUndefined(tableInfo.database_name)
+        metadata.schemaName = stringOrUndefined(tableInfo.schema_name)
+        metadata.tableRows = numberOrUndefined(tableInfo.estimated_size)
+        metadata.columnCount = numberOrUndefined(tableInfo.column_count)
+        metadata.indexCount = numberOrUndefined(tableInfo.index_count)
+        metadata.checkCount = numberOrUndefined(tableInfo.check_constraint_count)
+        metadata.createSql = stringOrUndefined(tableInfo.sql)
+      }
+    } catch {
+      // duckdb_tables() is best-effort across DuckDB versions.
+    }
+
+    if (profile.filePath && fs.existsSync(profile.filePath)) {
+      metadata.databaseSize = fs.statSync(profile.filePath).size
+      metadata.dataLength = metadata.databaseSize
+    }
 
     const columnsResult = await conn.execute(`
       SELECT 
@@ -206,7 +251,8 @@ export class DuckDBDriver implements DatabaseDriver {
       name: tableName,
       columns,
       indexes: Array.from(indexMap.values()),
-      foreignKeys: []
+      foreignKeys: [],
+      metadata
     }
   }
 
@@ -313,4 +359,45 @@ export class DuckDBDriver implements DatabaseDriver {
       this.connections.delete(profileId)
     }
   }
+}
+
+function firstDuckRow(result: DuckDBResult): Record<string, unknown> | undefined {
+  if (result.rows.length === 0) {
+    return undefined
+  }
+
+  const row = result.rows[0]
+  const object: Record<string, unknown> = {}
+  result.columns.forEach((column, index) => {
+    object[column] = row[index]
+  })
+  return object
+}
+
+function firstDuckValue(result: DuckDBResult): string | undefined {
+  if (result.rows.length === 0 || result.rows[0].length === 0) {
+    return undefined
+  }
+
+  return stringOrUndefined(result.rows[0][0])
+}
+
+function escapeSqlLiteral(value: string): string {
+  return String(value).replace(/'/g, "''")
+}
+
+function stringOrUndefined(value: unknown): string | undefined {
+  if (value === null || value === undefined || value === '') {
+    return undefined
+  }
+  return String(value)
+}
+
+function numberOrUndefined(value: unknown): number | undefined {
+  if (value === null || value === undefined || value === '') {
+    return undefined
+  }
+
+  const numberValue = Number(value)
+  return Number.isFinite(numberValue) ? numberValue : undefined
 }

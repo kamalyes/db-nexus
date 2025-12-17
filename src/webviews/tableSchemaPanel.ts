@@ -102,14 +102,23 @@ export class TableSchemaPanel {
         [t('table.sessions'), metadata.activeSessions]
       ]),
       renderInfoSection(t('table.databaseInfo'), [
+        [t('table.databaseName'), metadata.databaseName],
         [t('form.database'), scope.database || profile?.database],
-        [t('table.schema'), scope.schema],
+        [t('table.schema'), metadata.schemaName || scope.schema],
         [t('table.charset'), metadata.charset],
-        [t('table.collation'), metadata.tableCollation]
+        [t('table.collation'), metadata.tableCollation],
+        [t('table.databaseSize'), formatBytes(metadata.databaseSize)],
+        [t('table.pageCount'), metadata.pageCount],
+        [t('table.pageSize'), formatBytes(metadata.pageSize)],
+        [t('table.freeListCount'), metadata.freeListCount],
+        [t('table.schemaVersion'), metadata.schemaVersion],
+        [t('table.userVersion'), metadata.userVersion],
+        [t('table.journalMode'), metadata.journalMode]
       ]),
       renderInfoSection(t('table.tableInfo'), [
         [t('table.objectType'), objectType],
         [t('table.rowCount'), panelContext.rowCount ?? metadata.tableRows],
+        [t('table.owner'), metadata.owner],
         [t('table.engine'), metadata.engine],
         [t('table.autoIncrement'), metadata.autoIncrement],
         [t('table.rowFormat'), metadata.rowFormat],
@@ -118,11 +127,15 @@ export class TableSchemaPanel {
         [t('table.checkTime'), metadata.checkTime],
         [t('table.dataLength'), formatBytes(metadata.dataLength)],
         [t('table.indexLength'), formatBytes(metadata.indexLength)],
+        [t('table.totalLength'), formatBytes(metadata.totalLength)],
         [t('table.maxDataLength'), formatBytes(metadata.maxDataLength)],
+        [t('table.sortingKey'), metadata.sortingKey],
+        [t('table.partitionKey'), metadata.partitionKey],
+        [t('table.checkCount'), metadata.checkCount],
         [t('table.columnCount'), schema.columns.length],
         [t('table.indexCount'), schema.indexes.length],
         [t('table.foreignKeyCount'), schema.foreignKeys.length],
-        [t('table.primaryKeys'), primaryKeys.join(', ')],
+        [t('table.primaryKeys'), primaryKeys.join(', ') || metadata.primaryKeys],
         [t('table.autoIncrementColumns'), autoIncrementColumns.join(', ')],
         [t('table.nullableColumns'), nullableColumns],
         [t('table.notNullColumns'), notNullColumns]
@@ -465,7 +478,7 @@ export class TableSchemaPanel {
           <div class="comment">${escapeHtml(formatEmpty(schema.comment))}</div>
         </div>
         <div class="tab-panel" id="tab-sql">
-          <pre class="sql-preview">${escapeHtml(buildCreateTablePreview(profile, scope, schema))}</pre>
+          <pre class="sql-preview">${escapeHtml(String(metadata.createSql || buildCreateTablePreview(profile, scope, schema)))}</pre>
         </div>
       </section>
     </main>

@@ -9,7 +9,10 @@ import {
   QueryResult,
   SchemaObject,
   SchemaObjectType,
-  SchemaScope
+  SchemaScope,
+  TableColumn,
+  TableIndex,
+  TableSchema
 } from '@/core/types'
 import { DatabaseDriver } from './base'
 import { SecretService } from '@/services/secretService'
@@ -56,7 +59,7 @@ export class ClickHouseDriver implements DatabaseDriver {
     const baseUrl = this.getBaseUrl(profile)
     const url = new URL(baseUrl)
     url.pathname = '/'
-    url.searchParams.set('query', sql)
+    url.searchParams.set('query', ensureJsonFormat(sql))
 
     const username = profile.username || 'default'
     const password = await this.getPassword(profile)
@@ -174,4 +177,147 @@ export class ClickHouseDriver implements DatabaseDriver {
       throw new Error(error instanceof Error ? error.message : String(error))
     }
   }
+
+  async getTableSchema(profile: DbConnectionProfile, tableName: string, scope: SchemaScope): Promise<TableSchema> {
+    const database = scope.database || profile.database || 'default'
+    const metadata: TableSchema['metadata'] = {
+      engine: 'ClickHouse'
+    }
+
+    try {
+      const versionResult = await this.query(profile, 'SELECT version() AS version')
+      metadata.serverVersion = stringOrUndefined(versionResult.data?.[0]?.version)
+    } catch {
+      // Optional metadata only.
+    }
+
+    try {
+      const sessionsResult = await this.query(profile, 'SELECT count() AS active_sessions FROM system.processes')
+      metadata.activeSessions = numberOrUndefined(sessionsResult.data?.[0]?.active_sessions)
+    } catch {
+      // Optional metadata only.
+    }
+
+    const tableResult = await this.query(profile, `
+      SELECT
+        engine,
+        total_rows,
+        total_bytes,
+        metadata_modification_time,
+        create_table_query,
+        primary_key,
+        sorting_key,
+        partition_key
+      FROM system.tables
+      WHERE database = '${escapeSqlLiteral(database)}'
+        AND name = '${escapeSqlLiteral(tableName)}'
+      LIMIT 1
+    `)
+
+    const tableInfo = tableResult.data?.[0] || {}
+    metadata.engine = stringOrUndefined(tableInfo.engine) || 'ClickHouse'
+    metadata.tableRows = numberOrUndefined(tableInfo.total_rows)
+    metadata.dataLength = numberOrUndefined(tableInfo.total_bytes)
+    metadata.updateTime = stringOrUndefined(tableInfo.metadata_modification_time)
+    metadata.createSql = stringOrUndefined(tableInfo.create_table_query)
+    metadata.primaryKeys = stringOrUndefined(tableInfo.primary_key)
+    metadata.sortingKey = stringOrUndefined(tableInfo.sorting_key)
+    metadata.partitionKey = stringOrUndefined(tableInfo.partition_key)
+
+    const columnsResult = await this.query(profile, `
+      SELECT
+        name,
+        type,
+        default_expression,
+        position,
+        comment
+      FROM system.columns
+      WHERE database = '${escapeSqlLiteral(database)}'
+        AND table = '${escapeSqlLiteral(tableName)}'
+      ORDER BY position
+    `)
+
+    const primaryKeyExpression = stringOrUndefined(tableInfo.primary_key) || ''
+    const columns: TableColumn[] = (columnsResult.data || []).map(row => {
+      const name = String(row.name || '')
+      const type = String(row.type || '')
+      return {
+        name,
+        type,
+        nullable: type.startsWith('Nullable('),
+        defaultValue: row.default_expression === null || row.default_expression === undefined ? null : String(row.default_expression),
+        isPrimaryKey: isClickHousePrimaryKeyColumn(primaryKeyExpression, name),
+        isAutoIncrement: false,
+        comment: String(row.comment || ''),
+        position: Number(row.position || 0)
+      }
+    })
+
+    const indexes: TableIndex[] = []
+    try {
+      const indexResult = await this.query(profile, `
+        SELECT name, expr, type
+        FROM system.data_skipping_indices
+        WHERE database = '${escapeSqlLiteral(database)}'
+          AND table = '${escapeSqlLiteral(tableName)}'
+        ORDER BY name
+      `)
+      indexes.push(...(indexResult.data || []).map(row => ({
+        name: String(row.name || ''),
+        columns: [String(row.expr || '')].filter(Boolean),
+        isUnique: false,
+        isPrimary: false,
+        type: String(row.type || '')
+      })))
+    } catch {
+      // Data-skipping indexes may be unavailable on older ClickHouse versions.
+    }
+
+    return {
+      name: tableName,
+      columns,
+      indexes,
+      foreignKeys: [],
+      comment: columns.find(column => column.comment)?.comment,
+      metadata
+    }
+  }
+}
+
+function ensureJsonFormat(sql: string): string {
+  const trimmed = sql.trim().replace(/;$/, '')
+  return /\bFORMAT\s+JSON\b/i.test(trimmed) ? trimmed : `${trimmed} FORMAT JSON`
+}
+
+function escapeSqlLiteral(value: string): string {
+  return String(value).replace(/'/g, "''")
+}
+
+function stringOrUndefined(value: unknown): string | undefined {
+  if (value === null || value === undefined || value === '') {
+    return undefined
+  }
+  return String(value)
+}
+
+function numberOrUndefined(value: unknown): number | undefined {
+  if (value === null || value === undefined || value === '') {
+    return undefined
+  }
+
+  const numberValue = Number(value)
+  return Number.isFinite(numberValue) ? numberValue : undefined
+}
+
+function isClickHousePrimaryKeyColumn(primaryKeyExpression: string, columnName: string): boolean {
+  if (!primaryKeyExpression) {
+    return false
+  }
+
+  const normalizedParts = primaryKeyExpression
+    .replace(/[()]/g, '')
+    .split(',')
+    .map(part => part.trim().replace(/^`|`$/g, ''))
+
+  return normalizedParts.includes(columnName)
 }
