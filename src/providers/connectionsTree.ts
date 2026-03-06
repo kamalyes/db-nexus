@@ -235,7 +235,7 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
     item.description = this.getConnectionDescription(node.profile, status)
     item.tooltip = this.getConnectionTooltip(node.profile, status)
     item.iconPath = this.getDriverIcon(node.profile.driverId)
-    item.contextValue = status?.status === 'connected' ? 'connection.connected' : 'connection'
+    item.contextValue = 'connection'
     
     if (status?.status === 'connected') {
       item.resourceUri = Uri.parse(`dbnexus://connected/${node.profile.id}`)

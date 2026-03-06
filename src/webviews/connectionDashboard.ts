@@ -198,6 +198,9 @@ export class ConnectionDashboard {
     if (!profile) return
 
     const driver = registry.getDriver(profile.driverId)
+    if (driver.dispose) {
+      await driver.dispose(id)
+    }
     
     connectionStatusManager.setStatus(id, 'connecting')
     await this._refresh()
@@ -211,6 +214,11 @@ export class ConnectionDashboard {
       result.ok ? undefined : result.message
     )
 
+    if (!result.ok && driver.dispose) {
+      await driver.dispose(id)
+    }
+
+    await commands.executeCommand('dbNexus.refreshConnections')
     await this._refresh()
 
     if (result.ok) {
@@ -227,6 +235,10 @@ export class ConnectionDashboard {
     if (!profile) return
 
     const driver = registry.getDriver(profile.driverId)
+    if (driver.dispose) {
+      await driver.dispose(id)
+    }
+
     connectionStatusManager.setStatus(id, 'connecting')
     await this._refresh()
     
@@ -234,10 +246,15 @@ export class ConnectionDashboard {
 
     if (result.ok) {
       connectionStatusManager.setStatus(id, 'connected', result.latencyMs)
+      await commands.executeCommand('dbNexus.refreshConnections')
       await this._refresh()
       window.showInformationMessage(t('connection.connected', profile.name))
     } else {
       connectionStatusManager.setStatus(id, 'error', undefined, result.message)
+      if (driver.dispose) {
+        await driver.dispose(id)
+      }
+      await commands.executeCommand('dbNexus.refreshConnections')
       await this._refresh()
       window.showErrorMessage(t('connection.connectFailed', result.message))
     }
@@ -262,7 +279,11 @@ export class ConnectionDashboard {
 
   private async _saveConnection(profileData: Partial<DbConnectionProfile>): Promise<void> {
     const store = ConnectionDashboard._connectionStore!
+    const registry = ConnectionDashboard._driverRegistry!
     const isEdit = !!profileData.id
+    const previousProfile = isEdit
+      ? store.getAll().find(connection => connection.id === profileData.id)
+      : undefined
     const profile: DbConnectionProfile = {
       id: profileData.id || this._generateId(),
       name: profileData.name || '',
@@ -278,6 +299,12 @@ export class ConnectionDashboard {
     }
 
     if (isEdit) {
+      const previousDriver = previousProfile ? registry.getDriver(previousProfile.driverId) : undefined
+      if (previousDriver?.dispose) {
+        await previousDriver.dispose(profile.id)
+      }
+      connectionStatusManager.clearStatus(profile.id)
+
       const connections = store.getAll()
       const updated = connections.map(c => c.id === profile.id ? profile : c)
       await store.saveAll(updated)
@@ -287,6 +314,7 @@ export class ConnectionDashboard {
       window.showInformationMessage(t('connection.added', profile.name))
     }
 
+    await commands.executeCommand('dbNexus.refreshConnections')
     await this._refresh()
   }
 

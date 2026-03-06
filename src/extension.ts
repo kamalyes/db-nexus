@@ -335,7 +335,25 @@ export function activate(context: ExtensionContext): void {
       await window.withProgress(
         { location: ProgressLocation.Notification, title: t('connection.testing') },
         async () => {
+          const driver = driverRegistry.getDriver(profile.driverId)
+          if (driver.dispose) {
+            await driver.dispose(profile.id)
+          }
+
+          connectionStatusManager.setStatus(profile.id, 'connecting')
           const result = await connectionService.testConnection(profile)
+          connectionStatusManager.setStatus(
+            profile.id,
+            result.ok ? 'connected' : 'error',
+            result.latencyMs,
+            result.ok ? undefined : result.message
+          )
+
+          if (!result.ok && driver.dispose) {
+            await driver.dispose(profile.id)
+          }
+
+          connectionsTreeProvider?.refresh()
           if (result.ok) {
             window.showInformationMessage(t('connection.testSuccess', result.latencyMs || 0))
           } else {
