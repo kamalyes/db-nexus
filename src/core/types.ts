@@ -57,6 +57,16 @@ export interface DbConnectionProfile {
   username?: string
   filePath?: string
   ssl?: boolean
+  clientDriver?: string
+  charset?: string
+  keepAliveInterval?: number
+  connectTimeout?: number
+  readTimeout?: number
+  writeTimeout?: number
+  useCompression?: boolean
+  autoConnect?: boolean
+  initialQuery?: string
+  note?: string
   createdAt: string
   updatedAt: string
 }

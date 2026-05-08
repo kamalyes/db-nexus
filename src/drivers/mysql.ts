@@ -48,6 +48,7 @@ export class MySQLDriver implements DatabaseDriver {
         user: profile.username,
         password,
         ssl: profile.ssl ? {} : undefined,
+        connectTimeout: (profile.connectTimeout ?? 30) * 1000,
         connectionLimit: 5
       })
       this.pools.set(key, pool)
@@ -68,7 +69,7 @@ export class MySQLDriver implements DatabaseDriver {
         user: profile.username,
         password,
         ssl: profile.ssl ? {} : undefined,
-        connectTimeout: 5000
+        connectTimeout: (profile.connectTimeout ?? 30) * 1000
       })
       await connection.query('SELECT 1')
       return {

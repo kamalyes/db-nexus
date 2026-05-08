@@ -24,6 +24,7 @@ export class CockroachDBDriver extends PostgreSQLDriver {
         user: profile.username || 'root',
         password,
         ssl: profile.ssl !== false ? { rejectUnauthorized: false } : false,
+        connectionTimeoutMillis: (profile.connectTimeout ?? 30) * 1000,
         max: 10
       })
       this.cockroachPools.set(key, pool)

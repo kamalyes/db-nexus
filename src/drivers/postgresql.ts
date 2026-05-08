@@ -57,7 +57,8 @@ export class PostgreSQLDriver implements DatabaseDriver {
         database,
         user: profile.username,
         password,
-        ssl: profile.ssl ? { rejectUnauthorized: false } : false
+        ssl: profile.ssl ? { rejectUnauthorized: false } : false,
+        connectionTimeoutMillis: (profile.connectTimeout ?? 30) * 1000
       })
       this.pools.set(key, pool)
     }
@@ -74,7 +75,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
       user: profile.username,
       password,
       ssl: profile.ssl ? { rejectUnauthorized: false } : false,
-      connectionTimeoutMillis: 5000
+      connectionTimeoutMillis: (profile.connectTimeout ?? 30) * 1000
     })
 
     try {

@@ -69,6 +69,7 @@ export class ClickHouseDriver implements DatabaseDriver {
       port: url.port,
       path: url.pathname + url.search,
       method: 'POST',
+      timeout: (profile.readTimeout ?? profile.connectTimeout ?? 30) * 1000,
       headers: {
         'Accept': 'application/json',
         'X-ClickHouse-User': username,
@@ -95,6 +96,9 @@ export class ClickHouseDriver implements DatabaseDriver {
         })
       })
       req.on('error', reject)
+      req.setTimeout((profile.readTimeout ?? profile.connectTimeout ?? 30) * 1000, () => {
+        req.destroy(new Error('ClickHouse request timed out'))
+      })
       req.end()
     })
   }
