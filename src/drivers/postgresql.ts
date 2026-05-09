@@ -39,14 +39,22 @@ export class PostgreSQLDriver implements DatabaseDriver {
     }
   }
 
-  protected async getPool(profile: DbConnectionProfile): Promise<Pool> {
-    const key = profile.id
+  protected getDefaultDatabase(profile: DbConnectionProfile): string {
+    return profile.database || 'postgres'
+  }
+
+  protected getPoolKey(profile: DbConnectionProfile, database: string): string {
+    return `${profile.id}:${database}`
+  }
+
+  protected async getPool(profile: DbConnectionProfile, database = this.getDefaultDatabase(profile)): Promise<Pool> {
+    const key = this.getPoolKey(profile, database)
     if (!this.pools.has(key)) {
       const password = await this.getPassword(profile)
       const pool = new Pool({
         host: profile.host || 'localhost',
         port: profile.port || 5432,
-        database: profile.database,
+        database,
         user: profile.username,
         password,
         ssl: profile.ssl ? { rejectUnauthorized: false } : false
@@ -62,7 +70,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
     const client = new Client({
       host: profile.host || 'localhost',
       port: profile.port || 5432,
-      database: profile.database,
+      database: this.getDefaultDatabase(profile),
       user: profile.username,
       password,
       ssl: profile.ssl ? { rejectUnauthorized: false } : false,
@@ -98,10 +106,11 @@ export class PostgreSQLDriver implements DatabaseDriver {
   }
 
   async listObjects(profile: DbConnectionProfile, scope: SchemaScope): Promise<SchemaObject[]> {
-    const pool = await this.getPool(profile)
+    const database = scope.database || this.getDefaultDatabase(profile)
+    const pool = await this.getPool(profile, database)
     const objects: SchemaObject[] = []
 
-    if (!scope.database) {
+    if (!scope.database || (scope.database && !scope.schema)) {
       const result = await pool.query(
         "SELECT schema_name as name FROM information_schema.schemata WHERE schema_name NOT LIKE 'pg_%' AND schema_name != 'information_schema' ORDER BY schema_name"
       )
@@ -112,13 +121,13 @@ export class PostgreSQLDriver implements DatabaseDriver {
           description: 'Schema'
         })
       }
-    } else if (!scope.schema) {
+    } else {
       const result = await pool.query(
         `SELECT table_name as name, table_type as type
          FROM information_schema.tables
          WHERE table_schema = $1
          ORDER BY table_name`,
-        [scope.database]
+        [scope.schema]
       )
       for (const row of result.rows as Array<{ name: string; type: string }>) {
         objects.push({
@@ -134,7 +143,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
 
   async executeQuery(profile: DbConnectionProfile, request: QueryRequest): Promise<QueryResult> {
     const start = Date.now()
-    const pool = await this.getPool(profile)
+    const pool = await this.getPool(profile, request.database || this.getDefaultDatabase(profile))
 
     try {
       const sql = request.limit
@@ -166,8 +175,8 @@ export class PostgreSQLDriver implements DatabaseDriver {
     options?: DataQueryOptions
   ): Promise<QueryResult> {
     const start = Date.now()
-    const pool = await this.getPool(profile)
-    const schema = scope.database || 'public'
+    const pool = await this.getPool(profile, scope.database || this.getDefaultDatabase(profile))
+    const schema = scope.schema || 'public'
     const qualifiedTable = `${schema}.${tableName}`
 
     let sql = `SELECT * FROM ${qualifiedTable}`
@@ -224,7 +233,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
     sql: string,
     scope: SchemaScope
   ): Promise<ExecutionPlan> {
-    const pool = await this.getPool(profile)
+    const pool = await this.getPool(profile, scope.database || this.getDefaultDatabase(profile))
 
     const result = await pool.query(`EXPLAIN (ANALYZE, FORMAT JSON) ${sql}`)
     const planData = result.rows[0] as { 'QUERY PLAN': unknown[] }
@@ -265,16 +274,18 @@ export class PostgreSQLDriver implements DatabaseDriver {
   }
 
   async dispose(profileId: string): Promise<void> {
-    const pool = this.pools.get(profileId)
-    if (pool) {
+    const entries = Array.from(this.pools.entries())
+      .filter(([key]) => key === profileId || key.startsWith(`${profileId}:`))
+
+    for (const [key, pool] of entries) {
       await pool.end()
-      this.pools.delete(profileId)
+      this.pools.delete(key)
     }
   }
 
   async getTableSchema(profile: DbConnectionProfile, tableName: string, scope: SchemaScope): Promise<TableSchema> {
-    const pool = await this.getPool(profile)
-    const schema = scope.database || 'public'
+    const pool = await this.getPool(profile, scope.database || this.getDefaultDatabase(profile))
+    const schema = scope.schema || 'public'
     const metadata: TableSchema['metadata'] = {}
 
     try {
@@ -464,7 +475,8 @@ export class PostgreSQLDriver implements DatabaseDriver {
     row: Record<string, unknown>,
     scope: SchemaScope
   ): Promise<MutationPlan> {
-    const schema = scope.database || 'public'
+    const database = scope.database || this.getDefaultDatabase(profile)
+    const schema = scope.schema || 'public'
     const qualifiedTable = `${schema}.${table}`
 
     const columns = Object.keys(row).join(', ')
@@ -473,6 +485,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
 
     return {
       table,
+      database,
       schema,
       type: 'insert',
       sql,
@@ -487,7 +500,8 @@ export class PostgreSQLDriver implements DatabaseDriver {
     originalRow: Record<string, unknown>,
     scope: SchemaScope
   ): Promise<MutationPlan> {
-    const schema = scope.database || 'public'
+    const database = scope.database || this.getDefaultDatabase(profile)
+    const schema = scope.schema || 'public'
     const qualifiedTable = `${schema}.${table}`
 
     const tableSchema = await this.getTableSchema!(profile, table, scope)
@@ -508,6 +522,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
 
     return {
       table,
+      database,
       schema,
       type: 'update',
       sql,
@@ -521,7 +536,8 @@ export class PostgreSQLDriver implements DatabaseDriver {
     row: Record<string, unknown>,
     scope: SchemaScope
   ): Promise<MutationPlan> {
-    const schema = scope.database || 'public'
+    const database = scope.database || this.getDefaultDatabase(profile)
+    const schema = scope.schema || 'public'
     const qualifiedTable = `${schema}.${table}`
 
     const tableSchema = await this.getTableSchema!(profile, table, scope)
@@ -536,6 +552,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
 
     return {
       table,
+      database,
       schema,
       type: 'delete',
       sql,
@@ -547,8 +564,16 @@ export class PostgreSQLDriver implements DatabaseDriver {
     profile: DbConnectionProfile,
     plan: MutationPlan
   ): Promise<DataEditResult> {
-    const pool = await this.getPool(profile)
-    const values = Object.values({ ...plan, table: undefined, schema: undefined, type: undefined, sql: undefined, description: undefined })
+    const pool = await this.getPool(profile, plan.database || this.getDefaultDatabase(profile))
+    const values = Object.values({
+      ...plan,
+      table: undefined,
+      database: undefined,
+      schema: undefined,
+      type: undefined,
+      sql: undefined,
+      description: undefined
+    })
 
     try {
       const result = await pool.query(plan.sql, values)
@@ -574,8 +599,8 @@ export class PostgreSQLDriver implements DatabaseDriver {
     objectType: 'table' | 'view' | 'index' | 'trigger' | 'procedure' | 'function',
     scope: SchemaScope
   ): Promise<string> {
-    const pool = await this.getPool(profile)
-    const schema = scope.database || 'public'
+    const pool = await this.getPool(profile, scope.database || this.getDefaultDatabase(profile))
+    const schema = scope.schema || 'public'
 
     switch (objectType) {
       case 'table': {

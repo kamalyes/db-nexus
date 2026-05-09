@@ -9,14 +9,18 @@ export class CockroachDBDriver extends PostgreSQLDriver {
 
   private cockroachPools = new Map<string, Pool>()
 
-  protected override async getPool(profile: DbConnectionProfile): Promise<Pool> {
-    const key = profile.id
+  protected override getDefaultDatabase(profile: DbConnectionProfile): string {
+    return profile.database || 'defaultdb'
+  }
+
+  protected override async getPool(profile: DbConnectionProfile, database = this.getDefaultDatabase(profile)): Promise<Pool> {
+    const key = this.getPoolKey(profile, database)
     if (!this.cockroachPools.has(key)) {
       const password = await this.getPassword(profile)
       const pool = new Pool({
         host: profile.host || 'localhost',
         port: profile.port || 26257,
-        database: profile.database || 'defaultdb',
+        database,
         user: profile.username || 'root',
         password,
         ssl: profile.ssl !== false ? { rejectUnauthorized: false } : false,
@@ -27,15 +31,25 @@ export class CockroachDBDriver extends PostgreSQLDriver {
     return this.cockroachPools.get(key)!
   }
 
-  override async listDatabases(): Promise<{ name: string; description?: string }[]> {
-    return [{ name: 'defaultdb', description: 'Default database' }]
+  override async listDatabases(profile: DbConnectionProfile): Promise<{ name: string; description?: string }[]> {
+    const pool = await this.getPool(profile)
+    const result = await pool.query(`
+      SELECT datname AS name
+      FROM pg_database
+      WHERE datistemplate = false
+      ORDER BY datname
+    `)
+    return result.rows.map((row: { name: string }) => ({
+      name: row.name
+    }))
   }
 
   override async listObjects(profile: DbConnectionProfile, scope: SchemaScope): Promise<SchemaObject[]> {
-    const pool = await this.getPool(profile)
+    const database = scope.database || this.getDefaultDatabase(profile)
+    const pool = await this.getPool(profile, database)
     const objects: SchemaObject[] = []
 
-    if (!scope.database) {
+    if (!scope.database || (scope.database && !scope.schema)) {
       const result = await pool.query(`
         SELECT schema_name as name 
         FROM information_schema.schemata 
@@ -59,7 +73,7 @@ export class CockroachDBDriver extends PostgreSQLDriver {
          FROM information_schema.tables
          WHERE table_schema = $1
          ORDER BY table_name`,
-        [scope.database]
+        [scope.schema]
       )
       for (const row of result.rows as Array<{ name: string; type: string }>) {
         objects.push({
@@ -74,10 +88,12 @@ export class CockroachDBDriver extends PostgreSQLDriver {
   }
 
   override async dispose(profileId: string): Promise<void> {
-    const pool = this.cockroachPools.get(profileId)
-    if (pool) {
+    const entries = Array.from(this.cockroachPools.entries())
+      .filter(([key]) => key === profileId || key.startsWith(`${profileId}:`))
+
+    for (const [key, pool] of entries) {
       await pool.end()
-      this.cockroachPools.delete(profileId)
+      this.cockroachPools.delete(key)
     }
   }
 }

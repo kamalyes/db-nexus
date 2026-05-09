@@ -682,7 +682,7 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
   }
 
   private shouldShowDatabaseCatalog(driverId: DatabaseDriverId): boolean {
-    return ['mysql', 'mariadb', 'clickhouse', 'sqlite', 'duckdb'].includes(driverId)
+    return ['postgresql', 'cockroachdb', 'mysql', 'mariadb', 'clickhouse', 'sqlite', 'duckdb'].includes(driverId)
   }
 
   private isTableLikeObject(object: SchemaObject): boolean {

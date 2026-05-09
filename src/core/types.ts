@@ -198,6 +198,7 @@ export interface DataEditResult {
 
 export interface MutationPlan {
   table: string
+  database?: string
   schema?: string
   type: 'insert' | 'update' | 'delete'
   sql: string

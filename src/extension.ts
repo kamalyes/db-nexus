@@ -147,8 +147,12 @@ export function activate(context: ExtensionContext): void {
     }
   }
 
-  const executeSql = async (profile: DbConnectionProfile, sql: string) => {
-    return driverRegistry.getDriver(profile.driverId).executeQuery(profile, { sql })
+  const executeSql = async (profile: DbConnectionProfile, sql: string, scope: SchemaScope = {}) => {
+    return driverRegistry.getDriver(profile.driverId).executeQuery(profile, {
+      sql,
+      database: scope.database,
+      schema: scope.schema
+    })
   }
 
   const openSqlDocument = async (sql: string): Promise<void> => {
@@ -221,7 +225,7 @@ export function activate(context: ExtensionContext): void {
   const exportTable = async (target: TableTarget, format: 'csv' | 'json' | 'sql'): Promise<void> => {
     try {
       const qualifiedName = getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)
-      const result = await executeSql(target.profile, `SELECT * FROM ${qualifiedName}`)
+      const result = await executeSql(target.profile, `SELECT * FROM ${qualifiedName}`, target.scope)
       if (format === 'csv') {
         await DataExportService.exportToCSV(result, target.tableName)
       } else if (format === 'json') {
@@ -601,7 +605,7 @@ export function activate(context: ExtensionContext): void {
       }
 
       try {
-        await executeSql(target.profile, sql)
+        await executeSql(target.profile, sql, target.scope)
         connectionsTreeProvider?.refreshTable(target.profile, target.tableName, target.scope)
         window.showInformationMessage(t('table.columnAdded', columnName))
       } catch (error: unknown) {
@@ -635,7 +639,7 @@ export function activate(context: ExtensionContext): void {
       if (!newName || newName === target.tableName) return
 
       try {
-        await executeSql(target.profile, buildRenameTableSql(target.profile.driverId, target.scope, target.tableName, newName))
+        await executeSql(target.profile, buildRenameTableSql(target.profile.driverId, target.scope, target.tableName, newName), target.scope)
         connectionsTreeProvider?.refresh()
         window.showInformationMessage(t('table.renamed', target.tableName, newName))
       } catch (error: unknown) {
@@ -660,7 +664,7 @@ export function activate(context: ExtensionContext): void {
       if (confirm !== t('table.truncate')) return
 
       try {
-        await executeSql(target.profile, `TRUNCATE TABLE ${getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)}`)
+        await executeSql(target.profile, `TRUNCATE TABLE ${getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)}`, target.scope)
         window.showInformationMessage(t('table.truncated', target.tableName))
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error)
@@ -702,7 +706,7 @@ export function activate(context: ExtensionContext): void {
       const sql = `SELECT COUNT(*) AS row_count FROM ${getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)};`
 
       try {
-        const result = await executeSql(target.profile, sql)
+        const result = await executeSql(target.profile, sql, target.scope)
         ResultPanel.show(context, t('query.resultTitle', `${target.profile.name} / ${target.tableName}`), result)
         await QueryHistoryService.getInstance().add(sql, target.profile, result)
       } catch (error: unknown) {
@@ -741,7 +745,7 @@ export function activate(context: ExtensionContext): void {
       }
 
       try {
-        await executeSql(target.profile, sql)
+        await executeSql(target.profile, sql, target.scope)
         connectionsTreeProvider?.refreshTable(target.profile, target.tableName, target.scope)
         window.showInformationMessage(t('table.columnRenamed', target.columnName, newName))
       } catch (error: unknown) {
@@ -762,7 +766,7 @@ export function activate(context: ExtensionContext): void {
 
       try {
         const qualifiedName = getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)
-        await executeSql(target.profile, `ALTER TABLE ${qualifiedName} DROP COLUMN ${quoteSqlIdentifier(target.profile.driverId, target.columnName)}`)
+        await executeSql(target.profile, `ALTER TABLE ${qualifiedName} DROP COLUMN ${quoteSqlIdentifier(target.profile.driverId, target.columnName)}`, target.scope)
         connectionsTreeProvider?.refreshTable(target.profile, target.tableName, target.scope)
         window.showInformationMessage(t('table.columnDropped', target.columnName))
       } catch (error: unknown) {
@@ -819,7 +823,7 @@ export function activate(context: ExtensionContext): void {
       )
 
       try {
-        await executeSql(target.profile, sql)
+        await executeSql(target.profile, sql, target.scope)
         connectionsTreeProvider?.refreshTable(target.profile, target.tableName, target.scope)
         window.showInformationMessage(t('table.indexCreated', indexName))
       } catch (error: unknown) {
@@ -841,7 +845,7 @@ export function activate(context: ExtensionContext): void {
       if (confirm !== t('common.delete')) return
 
       try {
-        await executeSql(node.connectionProfile, buildDropIndexSql(node.connectionProfile.driverId, node.scope, node.tableName, node.index.name))
+        await executeSql(node.connectionProfile, buildDropIndexSql(node.connectionProfile.driverId, node.scope, node.tableName, node.index.name), node.scope)
         connectionsTreeProvider?.refreshTable(node.connectionProfile, node.tableName, node.scope)
         window.showInformationMessage(t('table.indexDropped', node.index.name))
       } catch (error: unknown) {
@@ -873,7 +877,7 @@ export function activate(context: ExtensionContext): void {
           ? target.objectType === 'materializedView' ? 'MATERIALIZED VIEW' : 'VIEW'
           : 'TABLE'
         const qualifiedName = getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)
-        await executeSql(target.profile, `DROP ${objectKind} ${qualifiedName}`)
+        await executeSql(target.profile, `DROP ${objectKind} ${qualifiedName}`, target.scope)
         connectionsTreeProvider?.refresh()
         window.showInformationMessage(t('table.deleted', target.tableName))
       } catch (error: unknown) {
@@ -941,7 +945,7 @@ export function activate(context: ExtensionContext): void {
         const sql = new TextDecoder().decode(await workspace.fs.readFile(uris[0]))
         const result = await window.withProgress(
           { location: ProgressLocation.Notification, title: t('table.runningSqlFile') },
-          () => executeSql(dbContext.profile, sql)
+          () => executeSql(dbContext.profile, sql, dbContext.scope)
         )
         ResultPanel.show(context, t('query.resultTitle', dbContext.profile.name), result)
         await QueryHistoryService.getInstance().add(sql, dbContext.profile, result)
