@@ -729,21 +729,6 @@ export function activate(context: ExtensionContext): void {
       const qualifiedName = getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)
       const sql = buildRenameColumnSql(target.profile.driverId, qualifiedName, target.columnName, newName, target.columnType)
 
-      const mode = await window.showQuickPick(
-        [
-          { label: t('table.runNow'), value: 'run' as const },
-          { label: t('table.openSqlToReview'), value: 'open' as const }
-        ],
-        { placeHolder: t('table.renameColumnMode') }
-      )
-      if (!mode) return
-
-      if (mode.value === 'open') {
-        const document = await workspace.openTextDocument({ language: 'sql', content: `${sql}\n` })
-        await window.showTextDocument(document)
-        return
-      }
-
       try {
         await executeSql(target.profile, sql, target.scope)
         connectionsTreeProvider?.refreshTable(target.profile, target.tableName, target.scope)
