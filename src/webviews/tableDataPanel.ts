@@ -17,6 +17,7 @@ export class TableDataPanel {
   private _totalRows: number = 0
   private _filters: { column: string; operator: string; value: string }[] = []
   private _sorts: { column: string; direction: 'ASC' | 'DESC' }[] = []
+  private _disposed = false
 
   static show(
     context: ExtensionContext,
@@ -28,7 +29,7 @@ export class TableDataPanel {
     const column = ViewColumn.One
 
     if (TableDataPanel.currentPanel) {
-      TableDataPanel.currentPanel._panel.dispose()
+      TableDataPanel.currentPanel.dispose()
     }
 
     const panel = window.createWebviewPanel(
@@ -56,7 +57,7 @@ export class TableDataPanel {
       return false
     }
 
-    TableDataPanel.currentPanel._panel.dispose()
+    TableDataPanel.currentPanel.dispose()
     return true
   }
 
@@ -76,10 +77,14 @@ export class TableDataPanel {
 
     this._panel.webview.html = this._getLoadingHtml()
 
-    this._panel.onDidDispose(() => this.dispose(), null, this._disposables)
+    this._panel.onDidDispose(() => this.dispose(true), null, this._disposables)
 
     this._panel.webview.onDidReceiveMessage(
       async message => {
+        if (!this._isActive()) {
+          return
+        }
+
         switch (message.type) {
           case 'ready':
             await this._loadData()
@@ -114,6 +119,9 @@ export class TableDataPanel {
           case 'delete':
             await this._handleDelete(message.row)
             break
+          case 'commitChanges':
+            await this._handleCommitChanges(message.changes || [])
+            break
         }
       },
       null,
@@ -123,12 +131,19 @@ export class TableDataPanel {
 
   private async _loadData(): Promise<void> {
     try {
+      if (!this._isActive()) {
+        return
+      }
+
       if (!this._schema && this._driver.getTableSchema) {
         this._schema = await this._driver.getTableSchema(
           this._profile,
           this._tableName,
           this._scope
         )
+        if (!this._isActive()) {
+          return
+        }
       }
 
       const options: DataQueryOptions = {
@@ -152,13 +167,20 @@ export class TableDataPanel {
         this._scope,
         options
       )
+      if (!this._isActive()) {
+        return
+      }
 
       this._totalRows = result.totalRows || result.rowCount
 
-      this._panel.webview.html = this._getHtml(result)
+      this._setHtml(this._getEditableGridHtml(result))
     } catch (error: unknown) {
+      if (!this._isActive()) {
+        return
+      }
+
       const message = error instanceof Error ? error.message : String(error)
-      this._panel.webview.html = this._getErrorHtml(message)
+      this._setHtml(this._getErrorHtml(message))
     }
   }
 
@@ -218,6 +240,38 @@ export class TableDataPanel {
     }
   }
 
+  private async _handleCommitChanges(
+    changes: Array<{ row: Record<string, unknown>; originalRow: Record<string, unknown> }>
+  ): Promise<void> {
+    try {
+      if (!this._driver.planUpdate || !this._driver.executeMutation) {
+        throw new Error('Driver does not support update')
+      }
+
+      let affectedRows = 0
+      for (const change of changes) {
+        const plan = await this._driver.planUpdate(
+          this._profile,
+          this._tableName,
+          change.row,
+          change.originalRow,
+          this._scope
+        )
+        const result = await this._driver.executeMutation(this._profile, plan)
+        if (!result.success) {
+          throw new Error(result.error || 'Unknown error')
+        }
+        affectedRows += result.affectedRows || 0
+      }
+
+      this._sendMessage({ type: 'operationSuccess', message: `Committed ${affectedRows} row(s)` })
+      await this._loadData()
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      this._sendMessage({ type: 'operationError', error: message })
+    }
+  }
+
   private async _handleDelete(row: Record<string, unknown>): Promise<void> {
     try {
       if (!this._driver.planDelete || !this._driver.executeMutation) {
@@ -245,7 +299,41 @@ export class TableDataPanel {
   }
 
   private _sendMessage(message: any): void {
-    this._panel.webview.postMessage(message)
+    if (!this._isActive()) {
+      return
+    }
+
+    try {
+      void this._panel.webview.postMessage(message)
+    } catch (error: unknown) {
+      if (!this._isDisposedError(error)) {
+        throw error
+      }
+      this.dispose(true)
+    }
+  }
+
+  private _setHtml(html: string): void {
+    if (!this._isActive()) {
+      return
+    }
+
+    try {
+      this._panel.webview.html = html
+    } catch (error: unknown) {
+      if (!this._isDisposedError(error)) {
+        throw error
+      }
+      this.dispose(true)
+    }
+  }
+
+  private _isActive(): boolean {
+    return !this._disposed && TableDataPanel.currentPanel === this
+  }
+
+  private _isDisposedError(error: unknown): boolean {
+    return error instanceof Error && /webview is disposed/i.test(error.message)
   }
 
   private _getLoadingHtml(): string {
@@ -330,6 +418,584 @@ export class TableDataPanel {
 </html>`
   }
 
+  private _getEditableGridHtml(result: QueryResult): string {
+    const columns = result.columns.map(c => c.name)
+    const rows = result.rows
+    const totalPages = Math.max(1, Math.ceil(this._totalRows / this._pageSize))
+    const primaryKeyColumns = this._schema?.columns.filter(c => c.isPrimaryKey).map(c => c.name) || []
+    const canEdit = primaryKeyColumns.length > 0
+    const defaultColumnWidth = 180
+    const actionColumnWidth = 44
+
+    const colgroup = [
+      canEdit ? `<col style="width: ${actionColumnWidth}px">` : '',
+      ...columns.map((column, index) => `<col data-col-index="${index}" style="width: ${defaultColumnWidth}px">`)
+    ].join('')
+
+    const headers = columns.map((column, index) => {
+      const isPk = primaryKeyColumns.includes(column)
+      const sort = this._sorts.find(s => s.column === column)
+      const sortLabel = sort ? (sort.direction === 'ASC' ? 'ASC' : 'DESC') : ''
+      return `
+        <th class="sortable" data-column="${this._escapeAttr(column)}" data-col-index="${index}">
+          <div class="header-content">
+            <span>${isPk ? '<span class="pk-indicator" title="Primary Key">PK</span> ' : ''}${this._escapeHtml(column)}</span>
+            <span class="sort-icon">${sortLabel}</span>
+          </div>
+          <span class="col-resizer" data-col-index="${index}"></span>
+        </th>
+      `
+    }).join('')
+
+    const bodyRows = rows.map((row, rowIndex) => `
+      <tr data-row-index="${rowIndex}">
+        ${canEdit ? `<td class="row-state" title="Edit status"><span class="row-marker"></span></td>` : ''}
+        ${columns.map((column, columnIndex) => {
+          const value = row[column]
+          const raw = value === null || value === undefined ? '' : String(value)
+          const displayValue = value === null || value === undefined
+            ? '<span class="null-value">NULL</span>'
+            : this._escapeHtml(raw)
+          const readonly = primaryKeyColumns.includes(column) ? ' readonly-cell' : ''
+          const rowHandle = columnIndex === 0 ? '<span class="row-resizer" title="Resize row"></span>' : ''
+          return `<td class="data-cell${readonly}" data-row-index="${rowIndex}" data-column="${this._escapeAttr(column)}" data-raw="${this._escapeAttr(raw)}">${displayValue}${rowHandle}</td>`
+        }).join('')}
+      </tr>
+    `).join('')
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${this._escapeHtml(t('table.dataTitle', this._tableName))}</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 12px;
+      min-height: 100vh;
+      font-family: var(--vscode-font-family);
+      color: var(--vscode-foreground);
+      background: var(--vscode-editor-background);
+      font-size: 13px;
+      padding-bottom: ${canEdit ? '58px' : '12px'};
+    }
+    .toolbar, .filter-bar, .pagination {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .toolbar {
+      margin-bottom: 10px;
+    }
+    .filter-bar {
+      margin-bottom: 10px;
+    }
+    .stats {
+      margin-left: auto;
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+    }
+    button, select, input {
+      font: inherit;
+    }
+    button {
+      border: 0;
+      border-radius: 4px;
+      padding: 5px 10px;
+      cursor: pointer;
+      color: var(--vscode-button-foreground);
+      background: var(--vscode-button-background);
+    }
+    button:hover:not(:disabled) {
+      background: var(--vscode-button-hoverBackground);
+    }
+    button.secondary {
+      color: var(--vscode-button-secondaryForeground);
+      background: var(--vscode-button-secondaryBackground);
+    }
+    button.secondary:hover:not(:disabled) {
+      background: var(--vscode-button-secondaryHoverBackground);
+    }
+    button:disabled {
+      opacity: .45;
+      cursor: not-allowed;
+    }
+    select, input {
+      padding: 5px 8px;
+      border: 1px solid var(--vscode-input-border, var(--vscode-widget-border));
+      border-radius: 4px;
+      color: var(--vscode-input-foreground);
+      background: var(--vscode-input-background);
+    }
+    .table-container {
+      overflow: auto;
+      border: 1px solid var(--vscode-widget-border);
+      max-height: calc(100vh - ${canEdit ? '188px' : '138px'});
+    }
+    table {
+      border-collapse: collapse;
+      table-layout: fixed;
+      width: max-content;
+      min-width: 100%;
+      font-size: 13px;
+    }
+    th, td {
+      position: relative;
+      min-width: 56px;
+      height: 32px;
+      padding: 6px 10px;
+      border: 1px solid var(--vscode-widget-border);
+      text-align: left;
+      vertical-align: top;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      user-select: none;
+      background: var(--vscode-editorGroupHeader-tabsBackground);
+      font-weight: 600;
+    }
+    .header-content {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+    }
+    .sort-icon {
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+    }
+    .pk-indicator {
+      color: var(--vscode-textLink-foreground);
+      font-weight: 700;
+    }
+    .col-resizer {
+      position: absolute;
+      top: 0;
+      right: -3px;
+      width: 7px;
+      height: 100%;
+      cursor: col-resize;
+      z-index: 3;
+    }
+    .row-resizer {
+      position: absolute;
+      left: 0;
+      bottom: -3px;
+      width: 100%;
+      height: 7px;
+      cursor: row-resize;
+      z-index: 2;
+    }
+    tr:hover td {
+      background: var(--vscode-list-hoverBackground);
+    }
+    .data-cell {
+      cursor: default;
+    }
+    .data-cell:not(.readonly-cell) {
+      cursor: cell;
+    }
+    .data-cell.readonly-cell {
+      color: var(--vscode-descriptionForeground);
+    }
+    .data-cell.dirty {
+      background: var(--vscode-editor-inactiveSelectionBackground);
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: -1px;
+    }
+    .cell-editor {
+      width: 100%;
+      height: 100%;
+      min-width: 0;
+      border: 1px solid var(--vscode-focusBorder);
+      border-radius: 2px;
+      padding: 3px 5px;
+      color: var(--vscode-input-foreground);
+      background: var(--vscode-input-background);
+    }
+    .row-state {
+      width: ${actionColumnWidth}px;
+      text-align: center;
+      color: var(--vscode-descriptionForeground);
+    }
+    tr.row-dirty .row-marker::before {
+      content: "*";
+      color: var(--vscode-textLink-foreground);
+      font-weight: 700;
+    }
+    .null-value {
+      color: var(--vscode-descriptionForeground);
+      font-style: italic;
+    }
+    .pagination {
+      margin-top: 10px;
+    }
+    .page-info {
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+    }
+    .commit-bar {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      min-height: 46px;
+      padding: 8px 12px;
+      border-top: 1px solid var(--vscode-panel-border);
+      background: var(--vscode-editorGroupHeader-tabsBackground);
+      z-index: 10;
+    }
+    .pending-status {
+      margin-right: auto;
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+    }
+    .icon-button {
+      min-width: 34px;
+      font-size: 15px;
+      line-height: 1;
+    }
+    .toast {
+      position: fixed;
+      right: 16px;
+      bottom: ${canEdit ? '62px' : '16px'};
+      z-index: 20;
+      max-width: min(520px, calc(100vw - 32px));
+      padding: 10px 14px;
+      border-radius: 4px;
+      color: var(--vscode-foreground);
+      background: var(--vscode-editorWidget-background);
+      border: 1px solid var(--vscode-panel-border);
+      box-shadow: 0 8px 24px rgba(0,0,0,.24);
+    }
+    .toast.error {
+      border-color: var(--vscode-inputValidation-errorBorder);
+      background: var(--vscode-inputValidation-errorBackground);
+      color: var(--vscode-inputValidation-errorForeground);
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <button id="refreshBtn" class="secondary">${this._escapeHtml(t('common.retry'))}</button>
+    <div class="stats">${this._totalRows.toLocaleString()} rows total / Page ${this._currentPage} of ${totalPages}</div>
+  </div>
+
+  <div class="filter-bar">
+    <select id="filterColumn">
+      <option value="">Select column...</option>
+      ${columns.map(column => `<option value="${this._escapeAttr(column)}">${this._escapeHtml(column)}</option>`).join('')}
+    </select>
+    <select id="filterOperator">
+      <option value="=">=</option>
+      <option value="!=">!=</option>
+      <option value=">">&gt;</option>
+      <option value="<">&lt;</option>
+      <option value=">=">&gt;=</option>
+      <option value="<=">&lt;=</option>
+      <option value="LIKE">LIKE</option>
+      <option value="IS NULL">IS NULL</option>
+      <option value="IS NOT NULL">IS NOT NULL</option>
+    </select>
+    <input id="filterValue" type="text" placeholder="Filter value...">
+    <button id="applyFilterBtn" class="secondary">Apply Filter</button>
+    <button id="clearFilterBtn" class="secondary">Clear</button>
+  </div>
+
+  <div class="table-container">
+    <table id="dataGrid">
+      <colgroup>${colgroup}</colgroup>
+      <thead>
+        <tr>
+          ${canEdit ? '<th></th>' : ''}
+          ${headers}
+        </tr>
+      </thead>
+      <tbody id="tableBody">${bodyRows}</tbody>
+    </table>
+  </div>
+
+  <div class="pagination">
+    <button id="firstPage" class="secondary" ${this._currentPage === 1 ? 'disabled' : ''}>First</button>
+    <button id="prevPage" class="secondary" ${this._currentPage === 1 ? 'disabled' : ''}>Prev</button>
+    <span class="page-info">Page ${this._currentPage} of ${totalPages}</span>
+    <button id="nextPage" class="secondary" ${this._currentPage >= totalPages ? 'disabled' : ''}>Next</button>
+    <button id="lastPage" class="secondary" ${this._currentPage >= totalPages ? 'disabled' : ''}>Last</button>
+    <select id="pageSizeSelect">
+      <option value="25" ${this._pageSize === 25 ? 'selected' : ''}>25 rows</option>
+      <option value="50" ${this._pageSize === 50 ? 'selected' : ''}>50 rows</option>
+      <option value="100" ${this._pageSize === 100 ? 'selected' : ''}>100 rows</option>
+      <option value="200" ${this._pageSize === 200 ? 'selected' : ''}>200 rows</option>
+    </select>
+  </div>
+
+  ${canEdit ? `
+  <div class="commit-bar">
+    <span class="pending-status" id="pendingStatus">No pending changes</span>
+    <button class="icon-button" id="commitBtn" title="Commit changes (Ctrl+S)" disabled>&#10003;</button>
+    <button class="icon-button secondary" id="revertBtn" title="Cancel and restore" disabled>&#8634;</button>
+  </div>
+  ` : ''}
+
+  <script>
+    const vscode = acquireVsCodeApi();
+    const rows = ${this._escapeScriptJson(JSON.stringify(rows))};
+    const columns = ${this._escapeScriptJson(JSON.stringify(columns))};
+    const primaryKeyColumns = ${this._escapeScriptJson(JSON.stringify(primaryKeyColumns))};
+    const canEdit = ${canEdit ? 'true' : 'false'};
+    const pendingUpdates = new Map();
+
+    document.getElementById('refreshBtn').addEventListener('click', () => {
+      vscode.postMessage({ type: 'refresh' });
+    });
+
+    function parseTemporalValue(raw) {
+      if (!raw || typeof raw !== 'string') return '';
+      const value = raw.trim();
+      if (!/[T:\\-\\/]/.test(value)) return '';
+      const time = Date.parse(value);
+      if (!Number.isFinite(time)) return '';
+      const date = new Date(time);
+      return 'Local: ' + date.toLocaleString() + '\\nISO: ' + date.toISOString();
+    }
+
+    function renderCellValue(cell, value) {
+      cell.textContent = '';
+      if (value === null || value === undefined || value === '') {
+        const span = document.createElement('span');
+        span.className = 'null-value';
+        span.textContent = value === '' ? '' : 'NULL';
+        cell.appendChild(span);
+      } else {
+        cell.textContent = String(value);
+      }
+      if (!cell.querySelector('.row-resizer') && cell.parentElement.querySelector('.data-cell') === cell) {
+        const handle = document.createElement('span');
+        handle.className = 'row-resizer';
+        handle.title = 'Resize row';
+        cell.appendChild(handle);
+      }
+    }
+
+    function hasDiff(originalRow, nextRow) {
+      return columns.some(column => String(originalRow[column] ?? '') !== String(nextRow[column] ?? ''));
+    }
+
+    function setPendingCell(rowIndex, column, value, cell) {
+      const originalRow = rows[rowIndex];
+      const pending = pendingUpdates.get(rowIndex) || { originalRow, row: { ...originalRow } };
+      pending.row[column] = value;
+
+      const originalValue = String(originalRow[column] ?? '');
+      cell.classList.toggle('dirty', String(value ?? '') !== originalValue);
+
+      if (hasDiff(originalRow, pending.row)) {
+        pendingUpdates.set(rowIndex, pending);
+        cell.parentElement.classList.add('row-dirty');
+      } else {
+        pendingUpdates.delete(rowIndex);
+        cell.parentElement.classList.remove('row-dirty');
+        cell.parentElement.querySelectorAll('.data-cell').forEach(item => item.classList.remove('dirty'));
+      }
+      updateCommitState();
+    }
+
+    function startCellEdit(cell) {
+      if (!canEdit || cell.classList.contains('readonly-cell') || cell.querySelector('input')) return;
+      const rowIndex = Number(cell.dataset.rowIndex);
+      const column = cell.dataset.column;
+      const pending = pendingUpdates.get(rowIndex);
+      const sourceRow = pending ? pending.row : rows[rowIndex];
+      const currentValue = sourceRow[column] === null || sourceRow[column] === undefined ? '' : String(sourceRow[column]);
+
+      cell.textContent = '';
+      const input = document.createElement('input');
+      input.className = 'cell-editor';
+      input.value = currentValue;
+      cell.appendChild(input);
+      input.focus();
+      input.select();
+
+      let finished = false;
+      function finish(commit) {
+        if (finished) return;
+        finished = true;
+        const nextValue = input.value;
+        renderCellValue(cell, commit ? nextValue : currentValue);
+        if (commit) {
+          setPendingCell(rowIndex, column, nextValue, cell);
+        }
+      }
+
+      input.addEventListener('keydown', event => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          finish(true);
+        } else if (event.key === 'Escape') {
+          event.preventDefault();
+          finish(false);
+        } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+          event.preventDefault();
+          finish(true);
+          commitChanges();
+        }
+      });
+      input.addEventListener('blur', () => finish(true), { once: true });
+    }
+
+    document.querySelectorAll('.data-cell').forEach(cell => {
+      cell.addEventListener('dblclick', () => startCellEdit(cell));
+      cell.addEventListener('mouseenter', () => {
+        const parsed = parseTemporalValue(cell.dataset.raw || cell.textContent || '');
+        if (parsed) cell.title = parsed;
+      });
+    });
+
+    function updateCommitState() {
+      if (!canEdit) return;
+      const count = pendingUpdates.size;
+      document.getElementById('pendingStatus').textContent = count ? count + ' pending row(s)' : 'No pending changes';
+      document.getElementById('commitBtn').disabled = count === 0;
+      document.getElementById('revertBtn').disabled = count === 0;
+    }
+
+    function commitChanges() {
+      if (!pendingUpdates.size) return;
+      const changes = Array.from(pendingUpdates.values());
+      vscode.postMessage({ type: 'commitChanges', changes });
+    }
+
+    function revertChanges() {
+      pendingUpdates.clear();
+      document.querySelectorAll('tr[data-row-index]').forEach(row => {
+        const rowIndex = Number(row.dataset.rowIndex);
+        row.classList.remove('row-dirty');
+        row.querySelectorAll('.data-cell').forEach(cell => {
+          const column = cell.dataset.column;
+          renderCellValue(cell, rows[rowIndex][column]);
+          cell.classList.remove('dirty');
+        });
+      });
+      updateCommitState();
+    }
+
+    if (canEdit) {
+      document.getElementById('commitBtn').addEventListener('click', commitChanges);
+      document.getElementById('revertBtn').addEventListener('click', revertChanges);
+      window.addEventListener('keydown', event => {
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+          event.preventDefault();
+          commitChanges();
+        }
+      });
+    }
+
+    document.querySelectorAll('.col-resizer').forEach(handle => {
+      handle.addEventListener('mousedown', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        const index = handle.dataset.colIndex;
+        const col = document.querySelector('col[data-col-index="' + index + '"]');
+        const startX = event.clientX;
+        const startWidth = col.getBoundingClientRect().width;
+
+        function onMove(moveEvent) {
+          col.style.width = Math.max(64, startWidth + moveEvent.clientX - startX) + 'px';
+        }
+        function onUp() {
+          window.removeEventListener('mousemove', onMove);
+          window.removeEventListener('mouseup', onUp);
+        }
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+      });
+    });
+
+    document.getElementById('tableBody').addEventListener('mousedown', event => {
+      if (!event.target.classList.contains('row-resizer')) return;
+      event.preventDefault();
+      const row = event.target.closest('tr');
+      const startY = event.clientY;
+      const startHeight = row.getBoundingClientRect().height;
+
+      function onMove(moveEvent) {
+        row.style.height = Math.max(24, startHeight + moveEvent.clientY - startY) + 'px';
+      }
+      function onUp() {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+      }
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    });
+
+    document.querySelectorAll('th.sortable').forEach(th => {
+      th.addEventListener('click', event => {
+        if (event.target.classList.contains('col-resizer')) return;
+        const column = th.dataset.column;
+        const currentSort = ${this._escapeScriptJson(JSON.stringify(this._sorts))};
+        const existingSort = currentSort.find(sort => sort.column === column);
+        const direction = existingSort && existingSort.direction === 'ASC' ? 'DESC' : 'ASC';
+        vscode.postMessage({ type: 'sort', sorts: [{ column, direction }] });
+      });
+    });
+
+    document.getElementById('applyFilterBtn').addEventListener('click', () => {
+      const column = document.getElementById('filterColumn').value;
+      const operator = document.getElementById('filterOperator').value;
+      const value = document.getElementById('filterValue').value;
+      if (column && operator) {
+        vscode.postMessage({ type: 'filter', filters: [{ column, operator, value }] });
+      }
+    });
+    document.getElementById('clearFilterBtn').addEventListener('click', () => {
+      document.getElementById('filterColumn').value = '';
+      document.getElementById('filterValue').value = '';
+      vscode.postMessage({ type: 'filter', filters: [] });
+    });
+
+    document.getElementById('firstPage').addEventListener('click', () => vscode.postMessage({ type: 'pageChange', page: 1 }));
+    document.getElementById('prevPage').addEventListener('click', () => vscode.postMessage({ type: 'pageChange', page: ${this._currentPage - 1} }));
+    document.getElementById('nextPage').addEventListener('click', () => vscode.postMessage({ type: 'pageChange', page: ${this._currentPage + 1} }));
+    document.getElementById('lastPage').addEventListener('click', () => vscode.postMessage({ type: 'pageChange', page: ${totalPages} }));
+    document.getElementById('pageSizeSelect').addEventListener('change', event => {
+      vscode.postMessage({ type: 'pageSizeChange', pageSize: Number(event.target.value) });
+    });
+
+    window.addEventListener('message', event => {
+      const message = event.data;
+      if (message.type === 'operationSuccess') {
+        showToast(message.message, 'success');
+      } else if (message.type === 'operationError') {
+        showToast(message.error, 'error');
+      }
+    });
+
+    function showToast(message, type) {
+      const toast = document.createElement('div');
+      toast.className = 'toast ' + (type || '');
+      toast.textContent = message;
+      document.body.appendChild(toast);
+      setTimeout(() => toast.remove(), 3200);
+    }
+  </script>
+</body>
+</html>`
+  }
+
   private _getHtml(result: QueryResult): string {
     const columns = result.columns.map(c => c.name)
     const rows = result.rows
@@ -337,6 +1003,8 @@ export class TableDataPanel {
 
     const primaryKeyColumns = this._schema?.columns.filter(c => c.isPrimaryKey).map(c => c.name) || []
     const canEdit = primaryKeyColumns.length > 0
+
+    return this._getEditableGridHtml(result)
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -877,6 +1545,521 @@ export class TableDataPanel {
 </html>`
   }
 
+  private _getLegacyEditableGridHtml(
+    _result: QueryResult,
+    columns: string[],
+    rows: Record<string, unknown>[],
+    primaryKeyColumns: string[],
+    canEdit: boolean
+  ): string {
+    const totalPages = Math.max(1, Math.ceil(this._totalRows / this._pageSize))
+    const colgroup = [
+      canEdit ? '<col style="width: 54px">' : '',
+      ...columns.map(column => `<col data-column="${this._escapeAttr(column)}" style="width: 180px">`)
+    ].join('')
+    const headerCells = columns.map(column => {
+      const sort = this._sorts.find(item => item.column === column)
+      const sortText = sort ? sort.direction : ''
+      const pk = primaryKeyColumns.includes(column) ? '<span class="pk-indicator" title="Primary Key">PK</span> ' : ''
+      return `<th class="sortable" data-column="${this._escapeAttr(column)}">
+        <div class="th-content"><span>${pk}${this._escapeHtml(column)}</span><span class="sort-icon">${sortText}</span></div>
+        <span class="column-resize-handle" title="Resize column"></span>
+      </th>`
+    }).join('')
+    const rowHtml = rows.map((row, rowIndex) => `
+      <tr data-row-index="${rowIndex}">
+        ${canEdit ? '<td class="row-marker"></td>' : ''}
+        ${columns.map((column, columnIndex) => {
+          const value = row[column]
+          const rawValue = value === null || value === undefined ? '' : String(value)
+          const displayValue = value === null || value === undefined
+            ? '<span class="cell-value null-value">NULL</span>'
+            : `<span class="cell-value">${this._escapeHtml(rawValue)}</span>`
+          const editable = canEdit && !primaryKeyColumns.includes(column)
+          return `<td class="${editable ? 'editable' : ''}" data-column="${this._escapeAttr(column)}" data-raw="${this._escapeAttr(rawValue)}" tabindex="0">
+            ${displayValue}
+            ${columnIndex === 0 ? '<span class="row-resize-handle" title="Resize row"></span>' : ''}
+          </td>`
+        }).join('')}
+      </tr>
+    `).join('')
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${t('table.dataTitle', this._tableName)}</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      height: 100vh;
+      display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+      font-family: var(--vscode-font-family);
+      color: var(--vscode-foreground);
+      background: var(--vscode-editor-background);
+      font-size: 13px;
+    }
+    .toolbar, .filter-bar, .pagination, .commit-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      padding: 9px 12px;
+      border-bottom: 1px solid var(--vscode-panel-border);
+    }
+    .toolbar, .commit-bar { background: var(--vscode-editorGroupHeader-tabsBackground); }
+    .pagination, .commit-bar { border-top: 1px solid var(--vscode-panel-border); border-bottom: 0; }
+    .stats, .commit-status, .page-info {
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+    }
+    .stats { margin-left: auto; }
+    .commit-status { margin-right: auto; }
+    .btn {
+      padding: 5px 10px;
+      border: 0;
+      border-radius: 4px;
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      font: inherit;
+      cursor: pointer;
+    }
+    .btn:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
+    .btn-secondary {
+      background: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
+    }
+    .btn-secondary:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground); }
+    .btn:disabled {
+      opacity: .45;
+      cursor: not-allowed;
+    }
+    .icon-btn {
+      min-width: 34px;
+      height: 28px;
+      padding: 0 9px;
+      font-size: 14px;
+      line-height: 28px;
+    }
+    .filter-input, .filter-select, .page-size-select {
+      padding: 4px 8px;
+      border: 1px solid var(--vscode-widget-border);
+      border-radius: 4px;
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      font: inherit;
+      font-size: 12px;
+    }
+    .filter-input { min-width: 150px; }
+    .table-container {
+      min-height: 0;
+      overflow: auto;
+    }
+    table {
+      width: max-content;
+      min-width: 100%;
+      table-layout: fixed;
+      border-collapse: collapse;
+    }
+    th, td {
+      position: relative;
+      height: 32px;
+      min-height: 24px;
+      padding: 6px 10px;
+      border: 1px solid var(--vscode-widget-border);
+      text-align: left;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: var(--vscode-editorGroupHeader-tabsBackground);
+      font-weight: 600;
+    }
+    .th-content {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+    }
+    th.sortable { cursor: pointer; }
+    th.sortable:hover, tr:hover { background: var(--vscode-list-hoverBackground); }
+    .sort-icon {
+      color: var(--vscode-descriptionForeground);
+      font-size: 10px;
+    }
+    .pk-indicator {
+      color: var(--vscode-textLink-foreground);
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .row-marker {
+      color: var(--vscode-descriptionForeground);
+      text-align: center;
+    }
+    tr.dirty-row { background: var(--vscode-editor-inactiveSelectionBackground); }
+    tr.dirty-row .row-marker::before { content: "*"; }
+    td.editable { cursor: text; }
+    td.editable:hover { background: var(--vscode-editor-inactiveSelectionBackground); }
+    td.dirty-cell {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: -1px;
+    }
+    td.cell-editing {
+      padding: 0;
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: -1px;
+    }
+    td input {
+      width: 100%;
+      height: 100%;
+      min-height: 30px;
+      padding: 5px 9px;
+      border: 0;
+      outline: none;
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      font: inherit;
+    }
+    .null-value {
+      color: var(--vscode-descriptionForeground);
+      font-style: italic;
+    }
+    .column-resize-handle {
+      position: absolute;
+      top: 0;
+      right: -3px;
+      width: 7px;
+      height: 100%;
+      cursor: col-resize;
+      z-index: 3;
+    }
+    .row-resize-handle {
+      position: absolute;
+      left: 0;
+      bottom: -3px;
+      width: 100%;
+      height: 7px;
+      cursor: row-resize;
+      z-index: 2;
+    }
+    .toast {
+      position: fixed;
+      right: 16px;
+      bottom: 52px;
+      z-index: 10;
+      padding: 10px 14px;
+      border-radius: 4px;
+      background: var(--vscode-inputValidation-infoBackground);
+      border: 1px solid var(--vscode-inputValidation-infoBorder);
+    }
+    .toast.error {
+      background: var(--vscode-inputValidation-errorBackground);
+      border-color: var(--vscode-inputValidation-errorBorder);
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <button class="btn" id="refreshBtn">Refresh</button>
+    <div class="stats">
+      ${this._totalRows.toLocaleString()} rows total - Page ${this._currentPage} of ${totalPages}
+      ${canEdit ? '' : ` - ${this._escapeHtml(t('table.primaryKeyRequiredForEdit'))}`}
+    </div>
+  </div>
+
+  <div class="filter-bar">
+    <select class="filter-select" id="filterColumn">
+      <option value="">Select column...</option>
+      ${columns.map(c => `<option value="${this._escapeAttr(c)}">${this._escapeHtml(c)}</option>`).join('')}
+    </select>
+    <select class="filter-select" id="filterOperator">
+      <option value="=">=</option>
+      <option value="!=">!=</option>
+      <option value=">">&gt;</option>
+      <option value="<">&lt;</option>
+      <option value=">=">&gt;=</option>
+      <option value="<=">&lt;=</option>
+      <option value="LIKE">LIKE</option>
+      <option value="IS NULL">IS NULL</option>
+      <option value="IS NOT NULL">IS NOT NULL</option>
+    </select>
+    <input type="text" class="filter-input" id="filterValue" placeholder="Filter value...">
+    <button class="btn btn-secondary" id="applyFilterBtn">Apply Filter</button>
+    <button class="btn btn-secondary" id="clearFilterBtn">Clear</button>
+  </div>
+
+  <div class="table-container">
+    <table>
+      <colgroup>${colgroup}</colgroup>
+      <thead>
+        <tr>
+          ${canEdit ? '<th></th>' : ''}
+          ${headerCells}
+        </tr>
+      </thead>
+      <tbody>${rowHtml}</tbody>
+    </table>
+  </div>
+
+  <div class="pagination">
+    <button id="firstPage" ${this._currentPage === 1 ? 'disabled' : ''}>First</button>
+    <button id="prevPage" ${this._currentPage === 1 ? 'disabled' : ''}>Prev</button>
+    <span class="page-info">Page ${this._currentPage} of ${totalPages}</span>
+    <button id="nextPage" ${this._currentPage >= totalPages ? 'disabled' : ''}>Next</button>
+    <button id="lastPage" ${this._currentPage >= totalPages ? 'disabled' : ''}>Last</button>
+    <select class="page-size-select" id="pageSizeSelect">
+      <option value="25" ${this._pageSize === 25 ? 'selected' : ''}>25 rows</option>
+      <option value="50" ${this._pageSize === 50 ? 'selected' : ''}>50 rows</option>
+      <option value="100" ${this._pageSize === 100 ? 'selected' : ''}>100 rows</option>
+      <option value="200" ${this._pageSize === 200 ? 'selected' : ''}>200 rows</option>
+    </select>
+  </div>
+
+  <div class="commit-bar">
+    <span class="commit-status" id="pendingStatus">${this._escapeHtml(t('table.noPendingChanges'))}</span>
+    <button class="btn icon-btn" id="commitChanges" title="${this._escapeAttr(t('table.commitChanges'))}" disabled>&#10003;</button>
+    <button class="btn btn-secondary icon-btn" id="revertChanges" title="${this._escapeAttr(t('table.revertChanges'))}" disabled>&#8634;</button>
+  </div>
+
+  <script>
+    const vscode = acquireVsCodeApi();
+    const rows = ${this._escapeScriptJson(JSON.stringify(rows))};
+    const primaryKeyColumns = ${this._escapeScriptJson(JSON.stringify(primaryKeyColumns))};
+    const pendingTemplate = ${this._escapeScriptJson(JSON.stringify(t('table.pendingChanges')))};
+    const noPendingText = ${this._escapeScriptJson(JSON.stringify(t('table.noPendingChanges')))};
+    const parsedTimeLabel = ${this._escapeScriptJson(JSON.stringify(t('table.parsedTime')))};
+    const pendingUpdates = new Map();
+    let activeEditor = null;
+
+    document.getElementById('refreshBtn').addEventListener('click', () => {
+      vscode.postMessage({ type: 'refresh' });
+    });
+
+    function cellDisplay(value) {
+      return value === null || value === undefined ? 'NULL' : String(value);
+    }
+
+    function renderCell(cell, value) {
+      const hasHandle = cell.querySelector('.row-resize-handle') !== null;
+      cell.classList.remove('cell-editing');
+      cell.innerHTML = '<span class="cell-value"></span>' + (hasHandle ? '<span class="row-resize-handle" title="Resize row"></span>' : '');
+      const span = cell.querySelector('.cell-value');
+      if (value === null || value === undefined) {
+        span.classList.add('null-value');
+      }
+      span.textContent = cellDisplay(value);
+      cell.dataset.raw = value === null || value === undefined ? '' : String(value);
+    }
+
+    function beginCellEdit(cell) {
+      if (!cell.classList.contains('editable') || activeEditor) return;
+      const rowIndex = Number(cell.closest('tr').dataset.rowIndex);
+      const column = cell.dataset.column;
+      const current = pendingUpdates.get(rowIndex)?.row[column] ?? rows[rowIndex][column];
+      const input = document.createElement('input');
+      input.value = current === null || current === undefined ? '' : String(current);
+      cell.classList.add('cell-editing');
+      cell.textContent = '';
+      cell.appendChild(input);
+      activeEditor = { cell, input, rowIndex, column };
+      input.focus();
+      input.select();
+      input.addEventListener('keydown', event => {
+        if (event.key === 'Enter') finishCellEdit(true);
+        if (event.key === 'Escape') finishCellEdit(false);
+        event.stopPropagation();
+      });
+      input.addEventListener('blur', () => finishCellEdit(true));
+    }
+
+    function finishCellEdit(save) {
+      if (!activeEditor) return;
+      const { cell, input, rowIndex, column } = activeEditor;
+      activeEditor = null;
+      const pending = pendingUpdates.get(rowIndex);
+      const previous = pending?.row[column] ?? rows[rowIndex][column];
+      const next = input.value;
+      renderCell(cell, save ? next : previous);
+      if (save && String(previous ?? '') !== String(next ?? '')) {
+        const update = pending || { originalRow: { ...rows[rowIndex] }, row: { ...rows[rowIndex] } };
+        update.row[column] = next;
+        pendingUpdates.set(rowIndex, update);
+        markDirty(rowIndex);
+      }
+      updatePendingState();
+    }
+
+    function markDirty(rowIndex) {
+      const tr = document.querySelector('tr[data-row-index="' + rowIndex + '"]');
+      const pending = pendingUpdates.get(rowIndex);
+      if (!tr || !pending) return;
+      tr.classList.add('dirty-row');
+      tr.querySelectorAll('td.editable').forEach(cell => {
+        const column = cell.dataset.column;
+        cell.classList.toggle('dirty-cell', String(pending.originalRow[column] ?? '') !== String(pending.row[column] ?? ''));
+      });
+    }
+
+    function updatePendingState() {
+      const count = pendingUpdates.size;
+      document.getElementById('pendingStatus').textContent = count === 0 ? noPendingText : pendingTemplate.replace('{0}', String(count));
+      document.getElementById('commitChanges').disabled = count === 0;
+      document.getElementById('revertChanges').disabled = count === 0;
+    }
+
+    function commitChanges() {
+      finishCellEdit(true);
+      const changes = Array.from(pendingUpdates.values());
+      if (changes.length === 0) return;
+      vscode.postMessage({ type: 'commitChanges', changes });
+    }
+
+    function revertChanges() {
+      finishCellEdit(false);
+      pendingUpdates.clear();
+      document.querySelectorAll('tr[data-row-index]').forEach(tr => {
+        const rowIndex = Number(tr.dataset.rowIndex);
+        tr.classList.remove('dirty-row');
+        tr.querySelectorAll('td.editable').forEach(cell => {
+          cell.classList.remove('dirty-cell');
+          renderCell(cell, rows[rowIndex][cell.dataset.column]);
+        });
+      });
+      updatePendingState();
+    }
+
+    document.querySelectorAll('td.editable').forEach(cell => {
+      cell.addEventListener('dblclick', () => beginCellEdit(cell));
+      cell.addEventListener('keydown', event => {
+        if (event.key === 'Enter') beginCellEdit(cell);
+      });
+    });
+
+    document.getElementById('commitChanges').addEventListener('click', commitChanges);
+    document.getElementById('revertChanges').addEventListener('click', revertChanges);
+    window.addEventListener('keydown', event => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+        event.preventDefault();
+        commitChanges();
+      }
+    });
+
+    document.querySelectorAll('th.sortable').forEach(th => {
+      th.addEventListener('click', event => {
+        if (event.target.classList.contains('column-resize-handle')) return;
+        const column = th.dataset.column;
+        const currentSort = ${this._escapeScriptJson(JSON.stringify(this._sorts))};
+        const existingSort = currentSort.find(item => item.column === column);
+        vscode.postMessage({
+          type: 'sort',
+          sorts: [{ column, direction: existingSort?.direction === 'ASC' ? 'DESC' : 'ASC' }]
+        });
+      });
+    });
+
+    document.querySelectorAll('td[data-raw]').forEach(cell => {
+      cell.addEventListener('mouseenter', () => {
+        const parsed = parseTemporalValue(cell.dataset.raw);
+        if (parsed) cell.title = parsed;
+      });
+    });
+
+    function parseTemporalValue(raw) {
+      if (!raw || !/\\d{4}[-/]\\d{1,2}[-/]\\d{1,2}|T\\d{2}:\\d{2}:\\d{2}|\\d{2}:\\d{2}:\\d{2}/.test(raw)) return '';
+      const date = new Date(raw.includes(' ') ? raw.replace(' ', 'T') : raw);
+      if (Number.isNaN(date.getTime())) return '';
+      return parsedTimeLabel + ': ' + date.toLocaleString() + ' | ISO: ' + date.toISOString();
+    }
+
+    document.querySelectorAll('.column-resize-handle').forEach(handle => {
+      handle.addEventListener('mousedown', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        const th = handle.closest('th');
+        const col = document.querySelector('col[data-column="' + CSS.escape(th.dataset.column) + '"]');
+        const startX = event.clientX;
+        const startWidth = th.offsetWidth;
+        function onMouseMove(moveEvent) {
+          col.style.width = Math.max(72, startWidth + moveEvent.clientX - startX) + 'px';
+        }
+        function onMouseUp() {
+          document.removeEventListener('mousemove', onMouseMove);
+          document.removeEventListener('mouseup', onMouseUp);
+        }
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
+      });
+    });
+
+    document.addEventListener('mousedown', event => {
+      if (!event.target.classList.contains('row-resize-handle')) return;
+      event.preventDefault();
+      const tr = event.target.closest('tr');
+      const startY = event.clientY;
+      const startHeight = tr.offsetHeight;
+      function onMouseMove(moveEvent) {
+        tr.style.height = Math.max(24, startHeight + moveEvent.clientY - startY) + 'px';
+      }
+      function onMouseUp() {
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+      }
+      document.addEventListener('mousemove', onMouseMove);
+      document.addEventListener('mouseup', onMouseUp);
+    });
+
+    document.getElementById('applyFilterBtn').addEventListener('click', () => {
+      const column = document.getElementById('filterColumn').value;
+      const operator = document.getElementById('filterOperator').value;
+      const value = document.getElementById('filterValue').value;
+      if (column && operator) {
+        vscode.postMessage({ type: 'filter', filters: [{ column, operator, value }] });
+      }
+    });
+    document.getElementById('clearFilterBtn').addEventListener('click', () => {
+      document.getElementById('filterColumn').value = '';
+      document.getElementById('filterValue').value = '';
+      vscode.postMessage({ type: 'filter', filters: [] });
+    });
+    document.getElementById('firstPage').addEventListener('click', () => vscode.postMessage({ type: 'pageChange', page: 1 }));
+    document.getElementById('prevPage').addEventListener('click', () => vscode.postMessage({ type: 'pageChange', page: ${this._currentPage - 1} }));
+    document.getElementById('nextPage').addEventListener('click', () => vscode.postMessage({ type: 'pageChange', page: ${this._currentPage + 1} }));
+    document.getElementById('lastPage').addEventListener('click', () => vscode.postMessage({ type: 'pageChange', page: ${totalPages} }));
+    document.getElementById('pageSizeSelect').addEventListener('change', event => {
+      vscode.postMessage({ type: 'pageSizeChange', pageSize: parseInt(event.target.value, 10) });
+    });
+
+    window.addEventListener('message', event => {
+      const message = event.data;
+      if (message.type === 'operationSuccess') {
+        pendingUpdates.clear();
+        updatePendingState();
+        showToast(message.message, 'success');
+      }
+      if (message.type === 'operationError') {
+        showToast(message.error, 'error');
+      }
+    });
+    function showToast(message, type) {
+      const toast = document.createElement('div');
+      toast.className = 'toast ' + (type || '');
+      toast.textContent = message;
+      document.body.appendChild(toast);
+      setTimeout(() => toast.remove(), 3200);
+    }
+  </script>
+</body>
+</html>`
+  }
+
   private _escapeHtml(text: string): string {
     return String(text || '')
       .replace(/&/g, '&amp;')
@@ -886,9 +2069,33 @@ export class TableDataPanel {
       .replace(/'/g, '&#039;')
   }
 
-  private dispose(): void {
-    TableDataPanel.currentPanel = undefined
-    this._panel.dispose()
+  private _escapeAttr(text: string): string {
+    return this._escapeHtml(text).replace(/`/g, '&#096;')
+  }
+
+  private _escapeScriptJson(json: string): string {
+    return json
+      .replace(/</g, '\\u003c')
+      .replace(/>/g, '\\u003e')
+      .replace(/&/g, '\\u0026')
+      .replace(/\u2028/g, '\\u2028')
+      .replace(/\u2029/g, '\\u2029')
+  }
+
+  private dispose(panelAlreadyDisposed = false): void {
+    if (this._disposed) {
+      return
+    }
+
+    this._disposed = true
+    if (TableDataPanel.currentPanel === this) {
+      TableDataPanel.currentPanel = undefined
+    }
+
+    if (!panelAlreadyDisposed) {
+      this._panel.dispose()
+    }
+
     while (this._disposables.length) {
       const x = this._disposables.pop()
       if (x) {

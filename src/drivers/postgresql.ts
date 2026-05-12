@@ -1,4 +1,4 @@
-import { Client, Pool } from 'pg'
+import { Client, Pool, QueryResult as PgQueryResult } from 'pg'
 import {
   ConnectionTestResult,
   DatabaseCatalog,
@@ -20,6 +20,7 @@ import {
   ExecutionPlanNode
 } from '@/core/types'
 import { SQL_CAPABILITIES } from '@/core/constants'
+import { appendLimitIfNeeded } from '@/core/sql'
 import { DatabaseDriver } from './base'
 import { SecretService } from '@/services/secretService'
 
@@ -147,11 +148,9 @@ export class PostgreSQLDriver implements DatabaseDriver {
     const pool = await this.getPool(profile, request.database || this.getDefaultDatabase(profile))
 
     try {
-      const sql = request.limit
-        ? `${request.sql} LIMIT ${request.limit}`
-        : request.sql
+      const sql = appendLimitIfNeeded(request.sql, request.limit)
 
-      const result = await pool.query(sql)
+      const result = await this.queryWithSchema(pool, request.schema, sql)
 
       const columns = result.fields.map((field: { name: string; dataTypeID: number }) => ({
         name: field.name,
@@ -236,7 +235,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
   ): Promise<ExecutionPlan> {
     const pool = await this.getPool(profile, scope.database || this.getDefaultDatabase(profile))
 
-    const result = await pool.query(`EXPLAIN (ANALYZE, FORMAT JSON) ${sql}`)
+    const result = await this.queryWithSchema(pool, scope.schema, `EXPLAIN (ANALYZE, FORMAT JSON) ${sql}`)
     const planData = result.rows[0] as { 'QUERY PLAN': unknown[] }
 
     const parseNode = (node: Record<string, unknown>, id: string): ExecutionPlanNode => {
@@ -281,6 +280,24 @@ export class PostgreSQLDriver implements DatabaseDriver {
     for (const [key, pool] of entries) {
       await pool.end()
       this.pools.delete(key)
+    }
+  }
+
+  private async queryWithSchema(pool: Pool, schema: string | undefined, sql: string): Promise<PgQueryResult> {
+    if (!schema) {
+      return pool.query(sql)
+    }
+
+    const client = await pool.connect()
+    try {
+      const searchPath = schema === 'public'
+        ? quotePostgresIdentifier(schema)
+        : `${quotePostgresIdentifier(schema)}, public`
+      await client.query(`SET search_path TO ${searchPath}`)
+      return await client.query(sql)
+    } finally {
+      await client.query('RESET search_path').then(undefined, () => undefined)
+      client.release()
     }
   }
 
@@ -732,4 +749,8 @@ function numberOrUndefined(value: unknown): number | undefined {
 
   const numberValue = Number(value)
   return Number.isFinite(numberValue) ? numberValue : undefined
+}
+
+function quotePostgresIdentifier(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`
 }

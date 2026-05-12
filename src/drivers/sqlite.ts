@@ -1,6 +1,7 @@
 import * as fs from 'fs'
 import type { Database, SqlJsStatic } from 'sql.js'
 import { getSqlJsFilePath, loadSqlJs } from '@/core/sqlJs'
+import { appendLimitIfNeeded } from '@/core/sql'
 import {
   ConnectionTestResult,
   DatabaseCatalog,
@@ -102,13 +103,7 @@ export class SQLiteDriver implements DatabaseDriver {
     const db = await this.getConnection(profile)
     const objects: SchemaObject[] = []
 
-    if (!scope.parentName) {
-      objects.push({
-        name: 'main',
-        type: 'schema' as SchemaObjectType,
-        description: 'Main schema'
-      })
-    } else if (scope.parentName === 'main' && !scope.database) {
+    if (scope.parentName === 'main' || scope.database === 'main' || scope.schema === 'main') {
       const result = db.exec(
         "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name"
       )
@@ -123,6 +118,12 @@ export class SQLiteDriver implements DatabaseDriver {
           })
         }
       }
+    } else if (!scope.parentName) {
+      objects.push({
+        name: 'main',
+        type: 'schema' as SchemaObjectType,
+        description: 'Main schema'
+      })
     }
 
     return objects
@@ -133,16 +134,8 @@ export class SQLiteDriver implements DatabaseDriver {
     const db = await this.getConnection(profile)
 
     try {
-      let sql = request.sql.trim()
-      
-      // 如果请求指定了 limit，且 SQL 中没有 LIMIT 子句，则自动追加
-      if (request.limit && request.limit > 0) {
-        const limitRegex = /\s+LIMIT\s+\d+/i
-        if (!limitRegex.test(sql)) {
-          sql += ` LIMIT ${request.limit}`
-        }
-      }
-      
+      const sql = appendLimitIfNeeded(request.sql, request.limit)
+
       const result = db.exec(sql)
       
       if (result.length === 0) {

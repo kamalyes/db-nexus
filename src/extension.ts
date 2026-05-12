@@ -24,6 +24,7 @@ import { BackupRestoreService, BackupOptions, RestoreOptions } from '@/services/
 import { SchemaComparePanel } from '@/webviews/schemaComparePanel'
 import { DataMigrationService, MigrationOptions } from '@/services/dataMigrationService'
 import { ConnectionDashboard } from '@/webviews/connectionDashboard'
+import { SqlEditorPanel } from '@/webviews/sqlEditorPanel'
 
 let connectionsTreeProvider: ConnectionsTreeProvider | undefined
 let connectionsTreeView: ReturnType<typeof window.createTreeView> | undefined
@@ -48,6 +49,12 @@ type FieldTarget = {
 
 type TableSchemaTab = 'fields' | 'indexes' | 'foreignKeys' | 'checks' | 'triggers' | 'options' | 'comment' | 'sql'
 
+type QueryExecutionContext = {
+  profile: DbConnectionProfile
+  scope: SchemaScope
+  label?: string
+}
+
 export async function activate(context: ExtensionContext): Promise<void> {
   initI18n(context.extensionPath)
   SecretService.init(context)
@@ -59,6 +66,15 @@ export async function activate(context: ExtensionContext): Promise<void> {
   const connectionService = new ConnectionService(connectionStore, driverRegistry)
   const queryService = new QueryService(driverRegistry)
   const queryFileService = new QueryFileService(Uri.joinPath(context.globalStorageUri, 'queries'))
+  const documentQueryContexts = new Map<string, QueryExecutionContext>()
+
+  const bindSqlDocumentContext = (uri: Uri, queryContext: QueryExecutionContext): void => {
+    documentQueryContexts.set(uri.toString(), queryContext)
+  }
+
+  context.subscriptions.push(workspace.onDidCloseTextDocument(document => {
+    documentQueryContexts.delete(document.uri.toString())
+  }))
 
   connectionsTreeProvider = new ConnectionsTreeProvider(connectionService, context.extensionPath, queryFileService)
   connectionsTreeView = window.createTreeView('dbNexus.connections', {
@@ -79,7 +95,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
       return { profile: node.connectionProfile, scope: node.scope || {} }
     }
     if (node instanceof SchemaNode) {
-      return { profile: node.connectionProfile, scope: node.scope || {} }
+      return { profile: node.connectionProfile, scope: getContainerScope(node) }
     }
 
     const profile = await pickConnection(connectionService.getConnections())
@@ -153,7 +169,11 @@ export async function activate(context: ExtensionContext): Promise<void> {
     }
   }
 
-  const resolveFieldTarget = async (node: FieldNode | undefined): Promise<FieldTarget | undefined> => {
+  const resolveFieldTarget = async (node: FieldNode | FieldTarget | undefined): Promise<FieldTarget | undefined> => {
+    if (isFieldTarget(node)) {
+      return node
+    }
+
     if (!node) {
       window.showWarningMessage(t('table.selectColumn'))
       return undefined
@@ -176,13 +196,47 @@ export async function activate(context: ExtensionContext): Promise<void> {
     })
   }
 
-  const openSqlDocument = async (sql: string): Promise<void> => {
+  const openSqlDocument = async (sql: string, queryContext?: QueryExecutionContext): Promise<void> => {
+    if (queryContext) {
+      SqlEditorPanel.show(context, connectionService, driverRegistry, queryService, {
+        sql,
+        profile: queryContext.profile,
+        scope: queryContext.scope,
+        title: getQueryContextLabel(queryContext)
+      })
+      return
+    }
+
     const document = await workspace.openTextDocument({
       language: 'sql',
       content: sql.endsWith('\n') ? sql : `${sql}\n`
     })
     await window.showTextDocument(document)
   }
+
+  const resolveActiveQueryContext = async (): Promise<QueryExecutionContext | undefined> => {
+    const editor = window.activeTextEditor
+    if (editor) {
+      const queryContext = documentQueryContexts.get(editor.document.uri.toString())
+      if (queryContext) {
+        return queryContext
+      }
+    }
+
+    const profile = await pickConnection(connectionService.getConnections())
+    return profile ? { profile, scope: getDefaultQueryScope(profile), label: profile.name } : undefined
+  }
+
+  const getQueryContextLabel = (queryContext: QueryExecutionContext): string => {
+    const parts = [queryContext.profile.name, queryContext.scope.database, queryContext.scope.schema]
+      .filter((part): part is string => Boolean(part))
+    return queryContext.label || parts.join(' / ')
+  }
+
+  const getDefaultQueryScope = (profile: DbConnectionProfile): SchemaScope => ({
+    database: profile.database,
+    schema: profile.driverId === 'postgresql' || profile.driverId === 'cockroachdb' ? 'public' : undefined
+  })
 
   const runSqlFileUri = async (
     profile: DbConnectionProfile,
@@ -230,7 +284,10 @@ export async function activate(context: ExtensionContext): Promise<void> {
       const schema = await driver.getTableSchema(target.profile, target.tableName, target.scope)
       const qualifiedName = getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)
       const columns = schema.columns.filter(column => !column.isAutoIncrement)
-      await openSqlDocument(buildInsertTemplate(target.profile.driverId, qualifiedName, columns))
+      await openSqlDocument(buildInsertTemplate(target.profile.driverId, qualifiedName, columns), {
+        profile: target.profile,
+        scope: target.scope
+      })
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
       window.showErrorMessage(t('table.schemaFailed', message))
@@ -271,7 +328,10 @@ export async function activate(context: ExtensionContext): Promise<void> {
     try {
       const schema = target.schema || await driver.getTableSchema!(target.profile, target.tableName, target.scope)
       const sql = buildMockInsertTemplate(target.profile.driverId, target.scope, target.tableName, schema, rowCount)
-      await openSqlDocument(sql)
+      await openSqlDocument(sql, {
+        profile: target.profile,
+        scope: target.scope
+      })
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
       window.showErrorMessage(t('table.schemaFailed', message))
@@ -302,7 +362,10 @@ export async function activate(context: ExtensionContext): Promise<void> {
       const sql = kind === 'update'
         ? buildUpdateTemplate(target.profile.driverId, qualifiedName, schema.columns)
         : buildDeleteTemplate(target.profile.driverId, qualifiedName, schema.columns)
-      await openSqlDocument(sql)
+      await openSqlDocument(sql, {
+        profile: target.profile,
+        scope: target.scope
+      })
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
       window.showErrorMessage(t('table.schemaFailed', message))
@@ -445,6 +508,12 @@ export async function activate(context: ExtensionContext): Promise<void> {
       }
     }
     if (node.schemaObject.type === 'schema') {
+      if (node.connectionProfile.driverId === 'sqlite') {
+        return {
+          ...node.scope,
+          parentName: node.schemaObject.name
+        }
+      }
       if (node.scope.database) {
         return {
           ...node.scope,
@@ -457,6 +526,70 @@ export async function activate(context: ExtensionContext): Promise<void> {
       }
     }
     return node.scope || {}
+  }
+
+  const getChildContainerScope = (
+    profile: DbConnectionProfile,
+    scope: SchemaScope,
+    object: SchemaObject
+  ): SchemaScope => {
+    if (object.type === 'database') {
+      return {
+        ...scope,
+        database: object.name
+      }
+    }
+
+    if (object.type === 'schema') {
+      if (profile.driverId === 'sqlite') {
+        return {
+          ...scope,
+          parentName: object.name
+        }
+      }
+
+      if (scope.database) {
+        return {
+          ...scope,
+          schema: object.name
+        }
+      }
+
+      return {
+        ...scope,
+        database: object.name
+      }
+    }
+
+    return scope
+  }
+
+  const listTablesForScope = async (
+    profile: DbConnectionProfile,
+    scope: SchemaScope,
+    visited = new Set<string>()
+  ): Promise<SchemaObject[]> => {
+    const visitKey = [profile.id, scope.database || '', scope.schema || '', scope.parentName || ''].join('\u0000')
+    if (visited.has(visitKey)) {
+      return []
+    }
+    visited.add(visitKey)
+
+    const objects = await connectionService.listObjects(profile, scope)
+    const tables = objects
+      .filter(isTableLikeObject)
+      .map(table => ({ ...table, scope }))
+
+    if (tables.length > 0) {
+      return tables
+    }
+
+    const containers = objects.filter(object => !isTableLikeObject(object))
+    const nestedTables: SchemaObject[] = []
+    for (const object of containers) {
+      nestedTables.push(...await listTablesForScope(profile, getChildContainerScope(profile, scope, object), visited))
+    }
+    return nestedTables
   }
 
   const closeExpandedDatabaseTree = async (
@@ -736,16 +869,11 @@ export async function activate(context: ExtensionContext): Promise<void> {
       }, 100)
     }),
     commands.registerCommand('dbNexus.openSqlScratch', async () => {
-      const document = await workspace.openTextDocument({
-        language: 'sql',
-        content: t('query.scratchContent')
+      SqlEditorPanel.show(context, connectionService, driverRegistry, queryService, {
+        sql: t('query.scratchContent')
       })
-      await window.showTextDocument(document)
     }),
     commands.registerCommand('dbNexus.runQuery', async () => {
-      const profile = await pickConnection(connectionService.getConnections())
-      if (!profile) return
-
       const editor = window.activeTextEditor
       const sql = editor
         ? editor.document.getText(editor.selection.isEmpty ? undefined : editor.selection)
@@ -756,15 +884,22 @@ export async function activate(context: ExtensionContext): Promise<void> {
         return
       }
 
+      const queryContext = await resolveActiveQueryContext()
+      if (!queryContext) return
+
       try {
-        const result = await queryService.run(profile, { sql })
-        ResultPanel.show(context, t('query.resultTitle', profile.name), result)
-        await QueryHistoryService.getInstance().add(sql, profile, result)
+        const result = await queryService.run(queryContext.profile, {
+          sql,
+          database: queryContext.scope.database,
+          schema: queryContext.scope.schema
+        })
+        ResultPanel.show(context, t('query.resultTitle', getQueryContextLabel(queryContext)), result)
+        await QueryHistoryService.getInstance().add(sql, queryContext.profile, result)
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error)
         outputChannel.appendLine(message)
         window.showErrorMessage(t('query.failed', message))
-        await QueryHistoryService.getInstance().add(sql, profile, error instanceof Error ? error : new Error(message))
+        await QueryHistoryService.getInstance().add(sql, queryContext.profile, error instanceof Error ? error : new Error(message))
       }
     }),
     commands.registerCommand('dbNexus.showQueryHistory', async () => {
@@ -828,15 +963,15 @@ export async function activate(context: ExtensionContext): Promise<void> {
         return
       }
 
-      const profile = node.connectionProfile
-      const scope = node.scope || {}
+      const dbContext = await resolveNodeContext(node)
+      if (!dbContext) return
+
+      const profile = dbContext.profile
+      const scope = dbContext.scope
       const driver = driverRegistry.getDriver(profile.driverId)
 
       try {
-        const objects = await connectionService.listObjects(profile, scope)
-        const tables = objects.filter(object =>
-          object.type === 'table' || object.type === 'view' || object.type === 'materializedView'
-        )
+        const tables = await listTablesForScope(profile, scope)
         TableListPanel.show(context, profile, driver, scope, tables)
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error)
@@ -853,22 +988,39 @@ export async function activate(context: ExtensionContext): Promise<void> {
       })
       if (!tableName) return
 
-      const qualifiedName = getQualifiedObjectName(dbContext.profile.driverId, dbContext.scope, tableName)
-      const document = await workspace.openTextDocument({
-        language: 'sql',
-        content: [
-          `CREATE TABLE ${qualifiedName} (`,
-          '  id INT PRIMARY KEY',
-          ');',
-          ''
-        ].join('\n')
-      })
-      await window.showTextDocument(document)
+      const sql = buildCreateTableSql(dbContext.profile.driverId, dbContext.scope, tableName)
+      const mode = await window.showQuickPick(
+        [
+          { label: t('table.runNow'), value: 'run' as const },
+          { label: t('table.openSqlToReview'), value: 'open' as const }
+        ],
+        { placeHolder: t('table.addColumnMode') }
+      )
+      if (!mode) return
+
+      if (mode.value === 'open') {
+        await openSqlDocument(sql, dbContext)
+        return
+      }
+
+      try {
+        await executeSql(dbContext.profile, sql, dbContext.scope)
+        connectionsTreeProvider?.refresh()
+        await showTableSchemaForTarget({
+          profile: dbContext.profile,
+          scope: dbContext.scope,
+          tableName,
+          objectType: 'table'
+        })
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error)
+        window.showErrorMessage(t('table.createTableFailed', message))
+      }
     }),
     commands.registerCommand('dbNexus.designTable', async (node: SchemaNode | undefined) => {
       await commands.executeCommand('dbNexus.showTableSchema', node)
     }),
-    commands.registerCommand('dbNexus.addColumn', async (node: SchemaNode | TableDetailGroupNode | undefined) => {
+    commands.registerCommand('dbNexus.addColumn', async (node: SchemaNode | TableDetailGroupNode | TableTarget | undefined) => {
       const target = await resolveTableTarget(node)
       if (!target) return
 
@@ -935,6 +1087,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
         await executeSql(target.profile, sql, target.scope)
         connectionsTreeProvider?.refreshTable(target.profile, target.tableName, target.scope)
         window.showInformationMessage(t('table.columnAdded', columnName))
+        await showTableSchemaForTarget(target, { initialTab: 'fields' })
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error)
         window.showErrorMessage(t('table.addColumnFailed', message))
@@ -1018,7 +1171,10 @@ export async function activate(context: ExtensionContext): Promise<void> {
       const target = await resolveTableTarget(node)
       if (!target) return
 
-      await openSqlDocument(buildSelectTemplate(target.profile.driverId, target.scope, target.tableName))
+      await openSqlDocument(buildSelectTemplate(target.profile.driverId, target.scope, target.tableName), {
+        profile: target.profile,
+        scope: target.scope
+      })
     }),
     commands.registerCommand('dbNexus.openInsertSql', async (node: FieldNode | IndexNode | SchemaNode | TableDetailGroupNode | TablesGroupNode | undefined) => {
       await openInsertTemplate(node)
@@ -1068,7 +1224,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
         window.showErrorMessage(t('table.renameColumnFailed', message))
       }
     }),
-    commands.registerCommand('dbNexus.dropColumn', async (node: FieldNode | undefined) => {
+    commands.registerCommand('dbNexus.dropColumn', async (node: FieldNode | FieldTarget | undefined) => {
       const target = await resolveFieldTarget(node)
       if (!target) return
 
@@ -1084,6 +1240,12 @@ export async function activate(context: ExtensionContext): Promise<void> {
         await executeSql(target.profile, `ALTER TABLE ${qualifiedName} DROP COLUMN ${quoteSqlIdentifier(target.profile.driverId, target.columnName)}`, target.scope)
         connectionsTreeProvider?.refreshTable(target.profile, target.tableName, target.scope)
         window.showInformationMessage(t('table.columnDropped', target.columnName))
+        await showTableSchemaForTarget({
+          profile: target.profile,
+          scope: target.scope,
+          tableName: target.tableName,
+          objectType: 'table'
+        }, { initialTab: 'fields' })
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error)
         window.showErrorMessage(t('table.dropColumnFailed', message))
@@ -1276,15 +1438,26 @@ export async function activate(context: ExtensionContext): Promise<void> {
       if (!fileName) return
 
       try {
+        const content = buildSelectTemplate(target.profile.driverId, target.scope, target.tableName)
         const file = await queryFileService.create(
           target.profile,
           target.tableName,
           target.scope,
           fileName,
-          buildSelectTemplate(target.profile.driverId, target.scope, target.tableName)
+          content
         )
-        const document = await workspace.openTextDocument(file.uri)
-        await window.showTextDocument(document)
+        bindSqlDocumentContext(file.uri, {
+          profile: target.profile,
+          scope: target.scope,
+          label: `${target.profile.name} / ${file.name}`
+        })
+        SqlEditorPanel.show(context, connectionService, driverRegistry, queryService, {
+          sql: content,
+          profile: target.profile,
+          scope: target.scope,
+          title: file.name,
+          uri: file.uri
+        })
         connectionsTreeProvider?.refreshTable(target.profile, target.tableName, target.scope)
         window.showInformationMessage(t('table.queryFileCreated', file.name))
       } catch (error: unknown) {
@@ -1324,8 +1497,38 @@ export async function activate(context: ExtensionContext): Promise<void> {
     }),
     commands.registerCommand('dbNexus.openQueryFile', async (node: QueryFileNode | undefined) => {
       if (!node) return
-      const document = await workspace.openTextDocument(node.uri)
-      await window.showTextDocument(document)
+      const sql = new TextDecoder().decode(await workspace.fs.readFile(node.uri))
+      bindSqlDocumentContext(node.uri, {
+        profile: node.connectionProfile,
+        scope: node.scope,
+        label: `${node.connectionProfile.name} / ${node.fileName}`
+      })
+      SqlEditorPanel.show(context, connectionService, driverRegistry, queryService, {
+        sql,
+        profile: node.connectionProfile,
+        scope: node.scope,
+        title: node.fileName,
+        uri: node.uri
+      })
+    }),
+    commands.registerCommand('dbNexus.deleteQueryFile', async (node: QueryFileNode | undefined) => {
+      if (!node) return
+
+      const confirm = await window.showWarningMessage(
+        t('table.deleteQueryFileConfirm', node.fileName),
+        { modal: true },
+        t('common.delete')
+      )
+      if (confirm !== t('common.delete')) return
+
+      try {
+        await queryFileService.delete(node.uri)
+        connectionsTreeProvider?.refreshTable(node.connectionProfile, node.tableName, node.scope)
+        window.showInformationMessage(t('table.queryFileDeleted', node.fileName))
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error)
+        window.showErrorMessage(t('table.queryFileFailed', message))
+      }
     }),
     commands.registerCommand('dbNexus.runSqlFile', async (node: ConnectionNode | SchemaNode | TablesGroupNode | QueryFileNode | undefined) => {
       if (node instanceof QueryFileNode) {
@@ -1395,9 +1598,6 @@ export async function activate(context: ExtensionContext): Promise<void> {
       window.showInformationMessage(t('table.pasteNotSupported'))
     }),
     commands.registerCommand('dbNexus.showExecutionPlan', async () => {
-      const profile = await pickConnection(connectionService.getConnections())
-      if (!profile) return
-
       const editor = window.activeTextEditor
       const sql = editor
         ? editor.document.getText(editor.selection.isEmpty ? undefined : editor.selection)
@@ -1408,14 +1608,17 @@ export async function activate(context: ExtensionContext): Promise<void> {
         return
       }
 
-      const driver = driverRegistry.getDriver(profile.driverId)
+      const queryContext = await resolveActiveQueryContext()
+      if (!queryContext) return
+
+      const driver = driverRegistry.getDriver(queryContext.profile.driverId)
       if (!driver?.getExecutionPlan) {
         window.showErrorMessage(t('executionPlan.notSupported'))
         return
       }
 
       try {
-        const plan = await driver.getExecutionPlan(profile, sql, {})
+        const plan = await driver.getExecutionPlan(queryContext.profile, sql, queryContext.scope)
         ExecutionPlanPanel.show(context, plan, sql)
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error)
@@ -1944,6 +2147,19 @@ function isTableTarget(value: unknown): value is TableTarget {
     && typeof target.tableName === 'string'
     && !!target.scope
     && typeof target.objectType === 'string'
+}
+
+function isFieldTarget(value: unknown): value is FieldTarget {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+
+  const target = value as Partial<FieldTarget>
+  return !!target.profile
+    && !!target.scope
+    && typeof target.tableName === 'string'
+    && typeof target.columnName === 'string'
+    && typeof target.columnType === 'string'
 }
 
 function isTableLikeNode(node: SchemaNode): boolean {
@@ -2476,6 +2692,28 @@ function buildAddColumnSql(
   }
 
   return `${parts.join(' ')};`
+}
+
+function buildCreateTableSql(
+  driverId: DatabaseDriverId,
+  scope: SchemaScope,
+  tableName: string
+): string {
+  const qualifiedName = getQualifiedObjectName(driverId, scope, tableName)
+  const idColumn = driverId === 'postgresql' || driverId === 'cockroachdb'
+    ? `${quoteSqlIdentifier(driverId, 'id')} BIGSERIAL PRIMARY KEY`
+    : driverId === 'sqlite' || driverId === 'duckdb'
+      ? `${quoteSqlIdentifier(driverId, 'id')} INTEGER PRIMARY KEY`
+      : driverId === 'mysql' || driverId === 'mariadb'
+        ? `${quoteSqlIdentifier(driverId, 'id')} INT PRIMARY KEY AUTO_INCREMENT`
+        : `${quoteSqlIdentifier(driverId, 'id')} INT PRIMARY KEY`
+
+  return [
+    `CREATE TABLE ${qualifiedName} (`,
+    `  ${idColumn}`,
+    ');',
+    ''
+  ].join('\n')
 }
 
 function buildRenameTableSql(

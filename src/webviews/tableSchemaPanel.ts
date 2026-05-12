@@ -52,11 +52,11 @@ export class TableSchemaPanel {
 
     panel.webview.html = this.render(schema, panelContext)
     const messageSubscription = panel.webview.onDidReceiveMessage(async message => {
-      if (message?.type !== 'generateMockData' || !panelContext.profile) {
+      if (!message?.type || !panelContext.profile) {
         return
       }
 
-      await commands.executeCommand('dbNexus.generateData', {
+      const tableTarget = {
         profile: panelContext.profile,
         scope,
         tableName: schema.name,
@@ -64,7 +64,33 @@ export class TableSchemaPanel {
         rowCount: panelContext.rowCount,
         description: panelContext.description,
         schema
-      })
+      }
+
+      if (message.type === 'generateMockData') {
+        await commands.executeCommand('dbNexus.generateData', tableTarget)
+        return
+      }
+
+      if (message.type === 'addColumn' || message.type === 'insertColumn') {
+        await commands.executeCommand('dbNexus.addColumn', tableTarget)
+        return
+      }
+
+      if (message.type === 'dropColumn' && typeof message.columnName === 'string') {
+        const column = schema.columns.find(item => item.name === message.columnName)
+        if (!column) {
+          window.showWarningMessage(t('table.selectColumn'))
+          return
+        }
+
+        await commands.executeCommand('dbNexus.dropColumn', {
+          profile: panelContext.profile,
+          scope,
+          tableName: schema.name,
+          columnName: column.name,
+          columnType: column.type
+        })
+      }
     })
     panel.onDidDispose(() => {
       messageSubscription.dispose()
@@ -94,6 +120,7 @@ export class TableSchemaPanel {
     const qualifiedName = getQualifiedName(profile, scope, schema.name)
     const initialTab = panelContext.initialTab || 'fields'
     const selectedIndexName = panelContext.selectedIndexName
+    const canEdit = !!profile && objectType === 'table'
     const primaryKeys = schema.columns.filter(column => column.isPrimaryKey).map(column => column.name)
     const autoIncrementColumns = schema.columns.filter(column => column.isAutoIncrement).map(column => column.name)
     const nullableColumns = schema.columns.filter(column => column.nullable).length
@@ -479,9 +506,9 @@ export class TableSchemaPanel {
       <div class="toolbar" aria-label="Table design actions">
         <button class="tool" disabled>${t('common.save')}</button>
         <button class="tool" id="mockDataButton">${t('table.mockDataAction')}</button>
-        <button class="tool" disabled>${t('table.addColumnAction')}</button>
-        <button class="tool" disabled>${t('table.insertColumnAction')}</button>
-        <button class="tool" disabled>${t('table.dropColumnAction')}</button>
+        <button class="tool" id="addColumnButton" ${canEdit ? '' : 'disabled'}>${t('table.addColumnAction')}</button>
+        <button class="tool" id="insertColumnButton" ${canEdit ? '' : 'disabled'}>${t('table.insertColumnAction')}</button>
+        <button class="tool" id="dropColumnButton" ${canEdit && schema.columns.length > 0 ? '' : 'disabled'}>${t('table.dropColumnAction')}</button>
         <button class="tool" disabled>${t('table.primaryKey')}</button>
         <button class="tool" disabled>${t('table.moveUp')}</button>
         <button class="tool" disabled>${t('table.moveDown')}</button>
@@ -601,6 +628,7 @@ export class TableSchemaPanel {
     const columnDetails = ${escapeScriptJson(JSON.stringify(columnDetails))};
     const initialTab = ${escapeScriptJson(JSON.stringify(initialTab))};
     const selectedIndexName = ${escapeScriptJson(JSON.stringify(selectedIndexName || null))};
+    let selectedColumnName = columnDetails[0] ? columnDetails[0].name : null;
 
     function activateTab(tabName) {
       const tab = document.querySelector('.tab[data-tab="' + tabName + '"]');
@@ -622,6 +650,16 @@ export class TableSchemaPanel {
     document.getElementById('mockDataButton')?.addEventListener('click', () => {
       vscode.postMessage({ type: 'generateMockData' });
     });
+    document.getElementById('addColumnButton')?.addEventListener('click', () => {
+      vscode.postMessage({ type: 'addColumn' });
+    });
+    document.getElementById('insertColumnButton')?.addEventListener('click', () => {
+      vscode.postMessage({ type: 'insertColumn' });
+    });
+    document.getElementById('dropColumnButton')?.addEventListener('click', () => {
+      if (!selectedColumnName) return;
+      vscode.postMessage({ type: 'dropColumn', columnName: selectedColumnName });
+    });
 
     function updateColumnInfo(columnName) {
       const detail = columnDetails.find(item => item.name === columnName) || columnDetails[0];
@@ -637,6 +675,7 @@ export class TableSchemaPanel {
       row.addEventListener('click', () => {
         document.querySelectorAll('.field-row').forEach(item => item.classList.remove('selected'));
         row.classList.add('selected');
+        selectedColumnName = row.dataset.column;
         updateColumnInfo(row.dataset.column);
       });
     });

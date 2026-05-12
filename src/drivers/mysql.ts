@@ -18,6 +18,7 @@ import {
   DataQueryOptions
 } from '@/core/types'
 import { SQL_CAPABILITIES } from '@/core/constants'
+import { appendLimitIfNeeded } from '@/core/sql'
 import { DatabaseDriver } from './base'
 import { SecretService } from '@/services/secretService'
 
@@ -37,14 +38,14 @@ export class MySQLDriver implements DatabaseDriver {
     }
   }
 
-  private async getPool(profile: DbConnectionProfile): Promise<Pool> {
-    const key = profile.id
+  private async getPool(profile: DbConnectionProfile, database = profile.database): Promise<Pool> {
+    const key = `${profile.id}:${database || ''}`
     if (!this.pools.has(key)) {
       const password = await this.getPassword(profile)
       const pool = createPool({
         host: profile.host || 'localhost',
         port: profile.port || 3306,
-        database: profile.database,
+        database,
         user: profile.username,
         password,
         ssl: profile.ssl ? {} : undefined,
@@ -130,12 +131,10 @@ export class MySQLDriver implements DatabaseDriver {
 
   async executeQuery(profile: DbConnectionProfile, request: QueryRequest): Promise<QueryResult> {
     const start = Date.now()
-    const pool = await this.getPool(profile)
+    const pool = await this.getPool(profile, request.database || profile.database)
 
     try {
-      const sql = request.limit
-        ? `${request.sql} LIMIT ${request.limit}`
-        : request.sql
+      const sql = appendLimitIfNeeded(request.sql, request.limit)
 
       const [rows, fields] = await pool.query(sql)
 
@@ -257,10 +256,12 @@ export class MySQLDriver implements DatabaseDriver {
   }
 
   async dispose(profileId: string): Promise<void> {
-    const pool = this.pools.get(profileId)
-    if (pool) {
+    const entries = Array.from(this.pools.entries())
+      .filter(([key]) => key === profileId || key.startsWith(`${profileId}:`))
+
+    for (const [key, pool] of entries) {
       await pool.end()
-      this.pools.delete(profileId)
+      this.pools.delete(key)
     }
   }
 

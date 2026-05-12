@@ -309,6 +309,12 @@
         "icon": "$(play)"
       },
       {
+        "command": "dbNexus.deleteQueryFile",
+        "title": "%dbNexus.deleteQueryFile.title%",
+        "category": "%dbNexus.category%",
+        "icon": "$(trash)"
+      },
+      {
         "command": "dbNexus.searchDatabase",
         "title": "%dbNexus.searchDatabase.title%",
         "category": "%dbNexus.category%"
@@ -641,6 +647,11 @@
           "command": "dbNexus.runSqlFile",
           "when": "view == dbNexus.connections && viewItem == query.file",
           "group": "1_queryFile@2"
+        },
+        {
+          "command": "dbNexus.deleteQueryFile",
+          "when": "view == dbNexus.connections && viewItem == query.file",
+          "group": "1_queryFile@3"
         },
         {
           "command": "dbNexus.copyTableName",

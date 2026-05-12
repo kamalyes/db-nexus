@@ -51,6 +51,7 @@
   "dbNexus.addQueryFile.title": "\u6dfb\u52a0 SQL \u6587\u4ef6...",
   "dbNexus.openQueryFile.title": "\u6253\u5f00 SQL \u6587\u4ef6",
   "dbNexus.runSqlFile.title": "运行 SQL 文件...",
+  "dbNexus.deleteQueryFile.title": "删除 SQL 文件",
   "dbNexus.searchDatabase.title": "在数据库中查找",
   "dbNexus.createGroup.title": "新建组",
   "dbNexus.pasteIntoDatabase.title": "粘贴",

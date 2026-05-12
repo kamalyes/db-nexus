@@ -57,6 +57,10 @@ export class QueryFileService {
     return { name, uri }
   }
 
+  async delete(uri: Uri): Promise<void> {
+    await workspace.fs.delete(uri, { recursive: false, useTrash: true })
+  }
+
   private getFolderUri(profile: DbConnectionProfile, tableName: string, scope: SchemaScope): Uri {
     return Uri.joinPath(
       this.storageRoot,

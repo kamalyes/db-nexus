@@ -51,6 +51,7 @@
   "dbNexus.addQueryFile.title": "Add SQL File...",
   "dbNexus.openQueryFile.title": "Open SQL File",
   "dbNexus.runSqlFile.title": "Run SQL File...",
+  "dbNexus.deleteQueryFile.title": "Delete SQL File",
   "dbNexus.searchDatabase.title": "Find in Database",
   "dbNexus.createGroup.title": "New Group",
   "dbNexus.pasteIntoDatabase.title": "Paste",

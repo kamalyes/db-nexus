@@ -1,5 +1,6 @@
 import https from 'https'
 import http from 'http'
+import { appendLimitIfNeeded } from '@/core/sql'
 import {
   ConnectionTestResult,
   DatabaseCatalog,
@@ -160,16 +161,8 @@ export class ClickHouseDriver implements DatabaseDriver {
     const start = Date.now()
 
     try {
-      let sql = request.sql.trim()
-      
-      // 如果请求指定了 limit，且 SQL 中没有 LIMIT 子句，则自动追加
-      if (request.limit && request.limit > 0) {
-        const limitRegex = /\s+LIMIT\s+\d+/i
-        if (!limitRegex.test(sql)) {
-          sql += ` LIMIT ${request.limit}`
-        }
-      }
-      
+      let sql = appendLimitIfNeeded(request.sql, request.limit).replace(/;+\s*$/, '')
+
       sql += ' FORMAT JSON'
 
       const result = await this.query(profile, sql)

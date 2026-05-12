@@ -19,13 +19,23 @@ export class ResultPanel {
   }
 
   private static render(result: QueryResult): string {
-    const headers = result.columns.map(column => `<th>${escapeHtml(column.name)}</th>`).join('')
+    const hasColumns = result.columns.length > 0
+    const hasVisibleHeaders = result.columns.some(column => getDisplayColumnName(column.name) !== '')
+    const headers = hasVisibleHeaders
+      ? `<thead><tr>${result.columns.map(column => `<th>${escapeHtml(getDisplayColumnName(column.name))}</th>`).join('')}</tr></thead>`
+      : ''
     const rows = result.rows.map(row => {
       const cells = result.columns
         .map(column => `<td>${escapeHtml(formatValue(row[column.name]))}</td>`)
         .join('')
       return `<tr>${cells}</tr>`
     }).join('')
+    const table = hasColumns
+      ? `<table>
+      ${headers}
+      <tbody>${rows}</tbody>
+    </table>`
+      : ''
 
     return `<!doctype html>
 <html lang="en">
@@ -51,10 +61,7 @@ export class ResultPanel {
     <span class="muted">${result.elapsedMs} ms</span>
   </header>
   <div class="wrap">
-    <table>
-      <thead><tr>${headers}</tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
+    ${table}
   </div>
 </body>
 </html>`
@@ -66,6 +73,10 @@ function formatValue(value: unknown): string {
   if (value === undefined) return ''
   if (typeof value === 'object') return JSON.stringify(value)
   return String(value)
+}
+
+function getDisplayColumnName(name: string): string {
+  return name.trim() === '?column?' ? '' : name
 }
 
 function escapeHtml(value: string): string {
