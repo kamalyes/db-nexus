@@ -394,6 +394,11 @@
           "group": "1_connection@3"
         },
         {
+          "command": "dbNexus.closeExpandedDatabaseTree",
+          "when": "view == dbNexus.connections && viewItem == connection",
+          "group": "5_refresh@1"
+        },
+        {
           "command": "dbNexus.showTableList",
           "when": "view == dbNexus.connections && viewItem == database",
           "group": "1_database@1"

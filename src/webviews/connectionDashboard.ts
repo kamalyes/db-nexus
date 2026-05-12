@@ -174,7 +174,7 @@ export class ConnectionDashboard {
     const connections = store.getAll()
     const statuses = connectionStatusManager.getAllStatuses()
 
-    this._panel.webview.html = this._getHtml(connections, statuses)
+    this._panel.webview.html = this._getDashboardHtml(connections, statuses)
   }
 
   private async _showAddForm(): Promise<void> {
@@ -354,6 +354,7 @@ export class ConnectionDashboard {
     TableDataPanel.closeFor(profile)
 
     await commands.executeCommand('dbNexus.refreshConnections')
+    await commands.executeCommand('workbench.actions.treeView.dbNexus.connections.collapseAll').then(undefined, () => undefined)
     await this._refresh()
     window.showInformationMessage(t('connection.disconnected', profile.name))
   }
@@ -424,6 +425,504 @@ export class ConnectionDashboard {
 
   private _generateId(): string {
     return `conn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+  }
+
+  private _getDashboardHtml(connections: DbConnectionProfile[], statuses: { profileId: string; status: string; latency?: number; error?: string }[]): string {
+    const statusMap = new Map(statuses.map(s => [s.profileId, s]))
+    const total = connections.length
+    const connectedCount = connections.filter(profile => statusMap.get(profile.id)?.status === 'connected').length
+    const errorCount = connections.filter(profile => statusMap.get(profile.id)?.status === 'error').length
+    const availableCount = total - connectedCount - errorCount
+    const statusLabels: Record<string, string> = {
+      connected: t('dashboard.statusConnected'),
+      disconnected: t('dashboard.statusDisconnected'),
+      connecting: 'Connecting',
+      error: t('dashboard.statusError')
+    }
+    const driverColors: Record<string, string> = {
+      mysql: '#2ea043',
+      mariadb: '#c6905b',
+      postgresql: '#3b82f6',
+      cockroachdb: '#7c3aed',
+      sqlite: '#14b8a6',
+      duckdb: '#eab308',
+      clickhouse: '#f59e0b',
+      sqlserver: '#ef4444',
+      oracle: '#dc2626',
+      mongodb: '#22c55e',
+      redis: '#f97316',
+      snowflake: '#38bdf8'
+    }
+    const icon = (body: string) => `<svg class="icon" viewBox="0 0 16 16" aria-hidden="true">${body}</svg>`
+    const icons = {
+      database: icon('<path fill="currentColor" d="M8 1C4.7 1 2 2.1 2 3.5v9C2 13.9 4.7 15 8 15s6-1.1 6-2.5v-9C14 2.1 11.3 1 8 1Zm0 1.4c2.9 0 4.6.8 4.6 1.1S10.9 4.6 8 4.6s-4.6-.8-4.6-1.1S5.1 2.4 8 2.4Zm4.6 10.1c0 .3-1.7 1.1-4.6 1.1s-4.6-.8-4.6-1.1v-2.1C4.5 11.1 6.2 11.5 8 11.5s3.5-.4 4.6-1.1v2.1Zm0-4.5C12.6 8.3 10.9 9.1 8 9.1S3.4 8.3 3.4 8V5.8C4.5 6.5 6.2 6.9 8 6.9s3.5-.4 4.6-1.1V8Z"/>'),
+      refresh: icon('<path fill="currentColor" d="M13.7 2.3v4.2H9.5l1.7-1.7A4.7 4.7 0 0 0 3.8 6l-1.2-.6a6.1 6.1 0 0 1 9.6-1.5l1.5-1.6ZM2.3 13.7V9.5h4.2l-1.7 1.7A4.7 4.7 0 0 0 12.2 10l1.2.6a6.1 6.1 0 0 1-9.6 1.5l-1.5 1.6Z"/>'),
+      plus: icon('<path fill="currentColor" d="M7.25 2h1.5v5.25H14v1.5H8.75V14h-1.5V8.75H2v-1.5h5.25V2Z"/>'),
+      connect: icon('<path fill="currentColor" d="M5.2 6.7 2.8 4.3 4.3 2.8l2.4 2.4 1.5-1.5 1.1 1.1-4.5 4.5-1.1-1.1 1.5-1.5Zm5.6 2.6 2.4 2.4-1.5 1.5-2.4-2.4-1.5 1.5-1.1-1.1 4.5-4.5 1.1 1.1-1.5 1.5Z"/>'),
+      query: icon('<path fill="currentColor" d="M2 3.5A1.5 1.5 0 0 1 3.5 2h9A1.5 1.5 0 0 1 14 3.5v9a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12.5v-9Zm1.5 0v9h9v-9h-9Zm1.4 2.1 1-.9 2.1 2.1-2.1 2.1-1-.9 1.2-1.2-1.2-1.2Zm3.8 4.5h3.1v1.3H8.7v-1.3Z"/>'),
+      test: icon('<path fill="currentColor" d="M6.8 1.8h2.4v1.4l3.9 6.6A2.8 2.8 0 0 1 10.7 14H5.3a2.8 2.8 0 0 1-2.4-4.2l3.9-6.6V1.8Zm1.4 2.1H7.8L4.1 10.5A1.4 1.4 0 0 0 5.3 12.6h5.4a1.4 1.4 0 0 0 1.2-2.1L8.2 3.9ZM5.4 9.7h5.2l.8 1.4H4.6l.8-1.4Z"/>'),
+      edit: icon('<path fill="currentColor" d="m11.7 1.7 2.6 2.6-7.9 7.9-3.3.7.7-3.3 7.9-7.9ZM4.9 10.3l-.2.9.9-.2 6.7-6.7-.7-.7-6.7 6.7Z"/>'),
+      delete: icon('<path fill="currentColor" d="M6.5 1h3l.7 1.5H14V4H2V2.5h3.8L6.5 1ZM3.2 5h9.6l-.7 9H3.9l-.7-9Zm2 1.4.4 6.2H7L6.6 6.4H5.2Zm3.8 0-.4 6.2H10l.4-6.2H9Z"/>'),
+      server: icon('<path fill="currentColor" d="M3 2h10a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1Zm0 7h10a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1Zm1.2-5.2v1.4h1.4V3.8H4.2Zm0 7v1.4h1.4v-1.4H4.2Z"/>')
+    }
+    const shortName = (name: string) => name.split(/\s+/).map(part => part.charAt(0)).join('').slice(0, 3).toUpperCase() || 'DB'
+    const endpoint = (profile: DbConnectionProfile) => {
+      if (profile.filePath) return profile.filePath
+      const host = profile.host || 'localhost'
+      return `${host}${profile.port ? `:${profile.port}` : ''}`
+    }
+    const scope = (profile: DbConnectionProfile) => profile.database || profile.username || 'default workspace'
+    const connectionCards = connections.map(profile => {
+      const statusObj = statusMap.get(profile.id)
+      const status = statusObj?.status || 'disconnected'
+      const driverDef = SUPPORTED_DRIVERS.find(d => d.id === profile.driverId)
+      const driverName = driverDef?.displayName || profile.driverId
+      const driverColor = driverColors[profile.driverId] || '#64748b'
+      const latency = statusObj?.latency ? `${statusObj.latency}ms` : ''
+      const id = this._escapeHtml(profile.id)
+      return `
+        <article class="connection-card ${status}" data-id="${id}">
+          <div class="status-rail"></div>
+          <header class="card-head">
+            <div class="identity">
+              <span class="driver-mark" style="--driver-color:${driverColor}">${this._escapeHtml(shortName(driverName))}</span>
+              <div class="title-stack">
+                <h2>${this._escapeHtml(profile.name)}</h2>
+                <span>${this._escapeHtml(driverName)}</span>
+              </div>
+            </div>
+            <div class="status-pill ${status}">
+              <span class="pulse"></span>
+              <span>${this._escapeHtml(statusLabels[status] || status)}</span>
+              ${latency ? `<b>${latency}</b>` : ''}
+            </div>
+          </header>
+
+          <div class="meta-grid">
+            <div class="meta-item">
+              <span class="meta-icon">${icons.server}</span>
+              <div>
+                <label>Endpoint</label>
+                <strong>${this._escapeHtml(endpoint(profile))}</strong>
+              </div>
+            </div>
+            <div class="meta-item">
+              <span class="meta-icon">${icons.database}</span>
+              <div>
+                <label>Scope</label>
+                <strong>${this._escapeHtml(scope(profile))}</strong>
+              </div>
+            </div>
+          </div>
+
+          ${statusObj?.error ? `<div class="error-message">${this._escapeHtml(statusObj.error)}</div>` : ''}
+
+          <footer class="card-actions">
+            ${status === 'connected' ? `
+              <button class="btn primary danger-soft" data-action="disconnect" data-id="${id}">${icons.connect}<span>${t('dashboard.actions.disconnect')}</span></button>
+              <button class="btn" data-action="openQuery" data-id="${id}">${icons.query}<span>${t('dashboard.actions.query')}</span></button>
+            ` : `
+              <button class="btn primary" data-action="connect" data-id="${id}">${icons.connect}<span>${t('dashboard.actions.connect')}</span></button>
+            `}
+            <button class="btn" data-action="testConnection" data-id="${id}">${icons.test}<span>${t('dashboard.actions.test')}</span></button>
+            <button class="icon-btn" data-action="editConnection" data-id="${id}" title="${t('dashboard.actions.edit')}">${icons.edit}</button>
+            <button class="icon-btn danger" data-action="deleteConnection" data-id="${id}" title="${t('dashboard.actions.delete')}">${icons.delete}</button>
+          </footer>
+        </article>
+      `
+    }).join('')
+    const emptyState = `
+      <section class="empty-state">
+        <div class="empty-mark">${icons.database}</div>
+        <h2>${t('dashboard.noConnections')}</h2>
+        <p>${t('dashboard.noConnectionsDesc')}</p>
+        <button class="btn primary large" data-action="addConnection">${icons.plus}<span>${t('dashboard.addConnection')}</span></button>
+      </section>
+    `
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${t('dashboard.title')}</title>
+  <style>
+    * { box-sizing: border-box; }
+    :root {
+      color-scheme: dark light;
+      --surface: color-mix(in srgb, var(--vscode-editor-background) 92%, var(--vscode-foreground) 8%);
+      --surface-2: color-mix(in srgb, var(--vscode-editor-background) 84%, var(--vscode-foreground) 16%);
+      --line: color-mix(in srgb, var(--vscode-panel-border) 80%, var(--vscode-foreground) 20%);
+      --muted: var(--vscode-descriptionForeground);
+      --accent: var(--vscode-textLink-foreground);
+      --ok: #2ea043;
+      --warn: #d29922;
+      --bad: #f85149;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--vscode-editor-background);
+      color: var(--vscode-foreground);
+      font-family: var(--vscode-font-family);
+      font-size: var(--vscode-font-size);
+    }
+    .dashboard {
+      width: min(1280px, calc(100vw - 40px));
+      margin: 0 auto;
+      padding: 24px 0 36px;
+    }
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 20px;
+      align-items: end;
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.18);
+    }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+    .hero h1 {
+      margin: 8px 0 6px;
+      font-size: 28px;
+      line-height: 1.15;
+      font-weight: 700;
+    }
+    .hero p {
+      margin: 0;
+      color: var(--muted);
+      max-width: 720px;
+    }
+    .hero-actions, .card-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .summary-strip {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(140px, 1fr));
+      gap: 10px;
+      margin: 16px 0 18px;
+    }
+    .summary-item {
+      min-height: 74px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+    .summary-item span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 8px;
+    }
+    .summary-item strong {
+      display: block;
+      font-size: 24px;
+      line-height: 1;
+    }
+    .summary-item.ok strong { color: var(--ok); }
+    .summary-item.warn strong { color: var(--warn); }
+    .summary-item.bad strong { color: var(--bad); }
+    .connections-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+      gap: 14px;
+    }
+    .connection-card {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      transition: border-color .16s ease, transform .16s ease, box-shadow .16s ease;
+    }
+    .connection-card:hover {
+      transform: translateY(-1px);
+      border-color: var(--vscode-focusBorder);
+      box-shadow: 0 16px 34px rgba(0, 0, 0, 0.2);
+    }
+    .status-rail {
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 4px;
+      background: var(--muted);
+    }
+    .connection-card.connected .status-rail { background: var(--ok); }
+    .connection-card.connecting .status-rail { background: var(--warn); }
+    .connection-card.error .status-rail { background: var(--bad); }
+    .card-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 16px 16px 12px 20px;
+      border-bottom: 1px solid var(--line);
+    }
+    .identity {
+      display: flex;
+      min-width: 0;
+      gap: 12px;
+      align-items: center;
+    }
+    .driver-mark {
+      display: inline-grid;
+      place-items: center;
+      width: 42px;
+      height: 42px;
+      flex: 0 0 auto;
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--driver-color) 18%, transparent);
+      color: color-mix(in srgb, var(--driver-color) 76%, var(--vscode-foreground) 24%);
+      border: 1px solid color-mix(in srgb, var(--driver-color) 42%, transparent);
+      font-size: 13px;
+      font-weight: 800;
+    }
+    .title-stack { min-width: 0; }
+    .title-stack h2 {
+      margin: 0 0 4px;
+      font-size: 16px;
+      line-height: 1.25;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .title-stack span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .status-pill {
+      align-self: flex-start;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+      padding: 5px 9px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      background: var(--surface-2);
+      font-size: 12px;
+    }
+    .status-pill b {
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .status-pill.connected { color: var(--ok); }
+    .status-pill.connecting { color: var(--warn); }
+    .status-pill.error { color: var(--bad); }
+    .pulse {
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: currentColor;
+    }
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      padding: 14px 16px 10px 20px;
+    }
+    .meta-item {
+      display: grid;
+      grid-template-columns: 26px minmax(0, 1fr);
+      gap: 8px;
+      align-items: center;
+      min-width: 0;
+      padding: 10px;
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--surface-2) 68%, transparent);
+      border: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+    }
+    .meta-icon {
+      display: inline-grid;
+      place-items: center;
+      color: var(--accent);
+    }
+    label {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      margin-bottom: 3px;
+    }
+    .meta-item strong {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .error-message {
+      margin: 0 16px 10px 20px;
+      padding: 9px 10px;
+      border: 1px solid color-mix(in srgb, var(--bad) 38%, transparent);
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--bad) 12%, transparent);
+      color: var(--bad);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .card-actions {
+      padding: 12px 16px 16px 20px;
+    }
+    .btn, .icon-btn {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-2);
+      color: var(--vscode-foreground);
+      cursor: pointer;
+      transition: border-color .14s ease, background .14s ease, transform .14s ease;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 32px;
+      padding: 7px 11px;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .btn:hover, .icon-btn:hover {
+      border-color: var(--vscode-focusBorder);
+      background: color-mix(in srgb, var(--surface-2) 72%, var(--accent) 28%);
+    }
+    .btn.primary {
+      border-color: var(--vscode-button-background);
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+    }
+    .btn.primary:hover {
+      background: var(--vscode-button-hoverBackground);
+    }
+    .btn.danger-soft {
+      border-color: color-mix(in srgb, var(--bad) 45%, var(--line));
+      background: color-mix(in srgb, var(--bad) 22%, var(--surface-2));
+      color: var(--vscode-foreground);
+    }
+    .btn.large {
+      min-height: 38px;
+      padding: 9px 14px;
+    }
+    .icon-btn {
+      display: inline-grid;
+      place-items: center;
+      width: 32px;
+      height: 32px;
+      padding: 0;
+    }
+    .icon-btn.danger:hover {
+      border-color: var(--bad);
+      color: var(--bad);
+      background: color-mix(in srgb, var(--bad) 14%, var(--surface-2));
+    }
+    .icon {
+      width: 16px;
+      height: 16px;
+      flex: 0 0 auto;
+    }
+    .empty-state {
+      display: grid;
+      place-items: center;
+      text-align: center;
+      gap: 10px;
+      min-height: 340px;
+      padding: 40px 20px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+    .empty-mark {
+      display: grid;
+      place-items: center;
+      width: 64px;
+      height: 64px;
+      border-radius: 8px;
+      color: var(--accent);
+      border: 1px solid var(--line);
+      background: var(--surface-2);
+    }
+    .empty-mark .icon {
+      width: 34px;
+      height: 34px;
+    }
+    .empty-state h2 {
+      margin: 8px 0 0;
+      font-size: 18px;
+    }
+    .empty-state p {
+      margin: 0 0 8px;
+      color: var(--muted);
+    }
+    @media (max-width: 760px) {
+      .dashboard { width: min(100vw - 24px, 1280px); padding-top: 12px; }
+      .hero { grid-template-columns: 1fr; align-items: start; padding: 16px; }
+      .summary-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .connections-grid { grid-template-columns: 1fr; }
+      .card-head { flex-direction: column; align-items: stretch; }
+      .meta-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="dashboard">
+    <section class="hero">
+      <div>
+        <span class="eyebrow">${icons.database}<span>DB Nexus</span></span>
+        <h1>${t('dashboard.title')}</h1>
+        <p>Manage live sessions, drivers, endpoints, and query entry points from one focused control surface.</p>
+      </div>
+      <div class="hero-actions">
+        <button class="btn" data-action="refresh">${icons.refresh}<span>${t('dashboard.refresh')}</span></button>
+        <button class="btn primary" data-action="addConnection">${icons.plus}<span>${t('dashboard.addConnection')}</span></button>
+      </div>
+    </section>
+
+    <section class="summary-strip" aria-label="Connection summary">
+      <div class="summary-item"><span>${t('dashboard.total')}</span><strong>${total}</strong></div>
+      <div class="summary-item ok"><span>${t('dashboard.connected')}</span><strong>${connectedCount}</strong></div>
+      <div class="summary-item warn"><span>Idle</span><strong>${availableCount}</strong></div>
+      <div class="summary-item bad"><span>${t('dashboard.statusError')}</span><strong>${errorCount}</strong></div>
+    </section>
+
+    ${connections.length > 0 ? `<section class="connections-grid">${connectionCards}</section>` : emptyState}
+  </main>
+
+  <script>
+    const vscode = acquireVsCodeApi();
+    const actionMap = {
+      refresh: function() { vscode.postMessage({ type: 'refresh' }); },
+      addConnection: function() { vscode.postMessage({ type: 'addConnection' }); },
+      editConnection: function(id) { vscode.postMessage({ type: 'editConnection', id: id }); },
+      deleteConnection: function(id) { vscode.postMessage({ type: 'deleteConnection', id: id }); },
+      testConnection: function(id) { vscode.postMessage({ type: 'testConnection', id: id }); },
+      connect: function(id) { vscode.postMessage({ type: 'connect', id: id }); },
+      disconnect: function(id) { vscode.postMessage({ type: 'disconnect', id: id }); },
+      openQuery: function(id) { vscode.postMessage({ type: 'openQuery', id: id }); }
+    };
+    document.addEventListener('click', function(event) {
+      const target = event.target.closest('[data-action]');
+      if (!target) return;
+      const action = target.getAttribute('data-action');
+      const id = target.getAttribute('data-id');
+      if (actionMap[action]) actionMap[action](id);
+    });
+  </script>
+</body>
+</html>`
   }
 
   private _getHtml(connections: DbConnectionProfile[], statuses: { profileId: string; status: string; latency?: number; error?: string }[]): string {

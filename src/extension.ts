@@ -384,7 +384,9 @@ export function activate(context: ExtensionContext): void {
 
     const scope = node ? getContainerScope(node) : dbContext.scope
     TableSchemaPanel.closeFor(dbContext.profile, scope)
-    connectionsTreeProvider?.refreshNode(node)
+    TableDataPanel.closeFor(dbContext.profile)
+    connectionsTreeProvider?.collapseAll()
+    await commands.executeCommand('workbench.actions.treeView.dbNexus.connections.collapseAll').then(undefined, () => undefined)
   }
 
   context.subscriptions.push(

@@ -165,6 +165,7 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
   private readonly onDidChangeTreeDataEmitter = new EventEmitter<ConnectionTreeNode | undefined>()
   readonly onDidChangeTreeData: Event<ConnectionTreeNode | undefined> = this.onDidChangeTreeDataEmitter.event
   private readonly tableSchemaCache = new Map<string, Promise<TableSchema>>()
+  private treeGeneration = 0
 
   constructor(
     private readonly connectionService: ConnectionService,
@@ -188,6 +189,12 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
   refreshNode(node?: ConnectionNode | SchemaNode | TablesGroupNode | TableDetailGroupNode): void {
     this.tableSchemaCache.clear()
     this.onDidChangeTreeDataEmitter.fire(node)
+  }
+
+  collapseAll(): void {
+    this.tableSchemaCache.clear()
+    this.treeGeneration++
+    this.onDidChangeTreeDataEmitter.fire(undefined)
   }
 
   getTreeItem(element: ConnectionTreeNode): TreeItem {
@@ -239,6 +246,7 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
     const status = connectionStatusManager.getStatus(node.profile.id)
     const statusType = status?.status || 'disconnected'
     
+    item.id = this.getTreeItemId('connection', node.profile.id)
     item.description = this.getConnectionStatusDescription(node.profile, status)
     item.tooltip = this.getConnectionTooltip(node.profile, status)
     item.iconPath = this.getConnectionStatusIcon(statusType)
@@ -312,6 +320,7 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
 
   private getSchemaTreeItem(node: SchemaNode): TreeItem {
     const item = new TreeItem(node.schemaObject.name, node.collapsibleState)
+    item.id = this.getTreeItemId('schema', node.connectionProfile.id, this.getScopeId(node.scope), node.schemaObject.type, node.schemaObject.name)
     item.description = this.getSchemaDescription(node.schemaObject)
     item.tooltip = node.schemaObject.description || node.schemaObject.name
     item.iconPath = this.getIconForType(node.schemaObject.type)
@@ -344,6 +353,7 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
 
   private getTablesGroupTreeItem(node: TablesGroupNode): TreeItem {
     const item = new TreeItem(t('table.tables'), TreeItemCollapsibleState.Collapsed)
+    item.id = this.getTreeItemId('tables', node.connectionProfile.id, this.getScopeId(node.scope))
     item.description = node.tableCount === undefined ? undefined : String(node.tableCount)
     item.tooltip = t('table.openTableList')
     item.iconPath = this.getIconUri('table')
@@ -353,6 +363,7 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
 
   private getTableDetailGroupTreeItem(node: TableDetailGroupNode): TreeItem {
     const item = new TreeItem(this.getTableDetailGroupLabel(node.kind), TreeItemCollapsibleState.Collapsed)
+    item.id = this.getTreeItemId('table-detail', node.connectionProfile.id, this.getScopeId(node.scope), node.tableName, node.kind)
     item.description = node.count === undefined ? undefined : String(node.count)
     item.iconPath = this.getTableDetailGroupIcon(node.kind)
     item.contextValue = `table.${node.kind}`
@@ -384,6 +395,7 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
   private getFieldTreeItem(node: FieldNode): TreeItem {
     const label = `${node.column.name}: ${node.column.type}`
     const item = new TreeItem(label, TreeItemCollapsibleState.None)
+    item.id = this.getTreeItemId('field', node.connectionProfile.id, this.getScopeId(node.scope), node.tableName, node.column.name)
     item.tooltip = this.getFieldTooltip(node)
     item.iconPath = this.getFieldIcon(node)
     item.contextValue = 'field'
@@ -392,6 +404,7 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
 
   private getIndexTreeItem(node: IndexNode): TreeItem {
     const item = new TreeItem(node.index.name, TreeItemCollapsibleState.None)
+    item.id = this.getTreeItemId('index', node.connectionProfile.id, this.getScopeId(node.scope), node.tableName, node.index.name)
     item.description = node.index.columns.join(', ')
     item.tooltip = [
       node.index.name,
@@ -729,6 +742,18 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
           : 'disabledForeground'
     const icon = status === 'connecting' ? 'sync~spin' : 'database'
     return new ThemeIcon(icon, new ThemeColor(color))
+  }
+
+  private getTreeItemId(...parts: string[]): string {
+    return [...parts.map(part => part.replace(/[|\\]/g, '_')), String(this.treeGeneration)].join('|')
+  }
+
+  private getScopeId(scope: SchemaScope): string {
+    return [
+      scope.database || '',
+      scope.schema || '',
+      scope.parentName || ''
+    ].join('/')
   }
 
   private getIconForType(type: string): Uri | ThemeIcon | { dark: Uri; light: Uri } {
