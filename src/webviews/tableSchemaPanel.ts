@@ -753,6 +753,7 @@ export class TableSchemaPanel {
     let selectedIndexId = null;
     let dirty = isCreateMode;
     let rowIdSeed = Date.now();
+    const typeHints = getTypeHints(driverId);
 
     function activateTab(tabName) {
       const tab = document.querySelector('.tab[data-tab="' + tabName + '"]');
@@ -789,6 +790,148 @@ export class TableSchemaPanel {
 
     function normalizeName(value) {
       return String(value || '').trim();
+    }
+
+    function getTypeHints(driver) {
+      const postgresTypes = [
+        'BIGSERIAL', 'SERIAL', 'SMALLSERIAL',
+        'BIGINT', 'INTEGER', 'SMALLINT',
+        'VARCHAR', 'VARCHAR(255)', 'CHAR', 'TEXT',
+        'BOOLEAN', 'NUMERIC', 'NUMERIC(10, 2)', 'DECIMAL', 'REAL', 'DOUBLE PRECISION',
+        'DATE', 'TIME', 'TIMESTAMP', 'TIMESTAMPTZ', 'INTERVAL',
+        'UUID', 'JSONB', 'JSON', 'BYTEA',
+        'INET', 'CIDR', 'MACADDR'
+      ];
+      const mysqlTypes = [
+        'BIGINT', 'INT', 'MEDIUMINT', 'SMALLINT', 'TINYINT',
+        'VARCHAR', 'VARCHAR(255)', 'CHAR', 'TEXT', 'MEDIUMTEXT', 'LONGTEXT',
+        'DECIMAL', 'DECIMAL(10, 2)', 'DOUBLE', 'FLOAT',
+        'DATE', 'TIME', 'DATETIME', 'TIMESTAMP', 'YEAR',
+        'BOOLEAN', 'JSON', 'BLOB', 'LONGBLOB',
+        'ENUM', 'SET'
+      ];
+      const hints = {
+        postgresql: postgresTypes,
+        cockroachdb: [...postgresTypes, 'STRING', 'BYTES'],
+        mysql: mysqlTypes,
+        mariadb: mysqlTypes,
+        sqlite: [
+          'INTEGER', 'REAL', 'TEXT', 'BLOB', 'NUMERIC',
+          'BOOLEAN', 'DATE', 'DATETIME'
+        ],
+        sqlserver: [
+          'BIGINT', 'INT', 'SMALLINT', 'TINYINT', 'BIT',
+          'NVARCHAR', 'NVARCHAR(255)', 'VARCHAR', 'VARCHAR(255)', 'NCHAR', 'CHAR',
+          'TEXT', 'NTEXT',
+          'DECIMAL', 'DECIMAL(10, 2)', 'NUMERIC', 'MONEY', 'SMALLMONEY',
+          'FLOAT', 'REAL',
+          'DATE', 'TIME', 'DATETIME', 'DATETIME2', 'SMALLDATETIME', 'DATETIMEOFFSET',
+          'UNIQUEIDENTIFIER', 'XML', 'VARBINARY', 'VARBINARY(MAX)', 'IMAGE'
+        ],
+        oracle: [
+          'NUMBER', 'NUMBER(10)', 'NUMBER(10, 2)', 'INTEGER', 'BINARY_FLOAT', 'BINARY_DOUBLE',
+          'VARCHAR2', 'VARCHAR2(255)', 'NVARCHAR2', 'NVARCHAR2(255)', 'CHAR', 'NCHAR',
+          'CLOB', 'NCLOB', 'BLOB', 'RAW', 'RAW(16)',
+          'DATE', 'TIMESTAMP', 'TIMESTAMP WITH TIME ZONE', 'INTERVAL DAY TO SECOND',
+          'JSON'
+        ],
+        duckdb: [
+          'BIGINT', 'INTEGER', 'SMALLINT', 'TINYINT', 'UBIGINT', 'UINTEGER',
+          'VARCHAR', 'VARCHAR(255)', 'TEXT',
+          'BOOLEAN', 'DECIMAL', 'DECIMAL(10, 2)', 'DOUBLE', 'REAL', 'FLOAT',
+          'DATE', 'TIME', 'TIMESTAMP', 'TIMESTAMPTZ', 'INTERVAL',
+          'UUID', 'JSON', 'BLOB', 'LIST', 'STRUCT', 'MAP'
+        ],
+        snowflake: [
+          'NUMBER', 'NUMBER(10, 2)', 'DECIMAL', 'NUMERIC', 'INT', 'INTEGER', 'BIGINT',
+          'FLOAT', 'DOUBLE', 'REAL',
+          'VARCHAR', 'VARCHAR(255)', 'STRING', 'TEXT', 'CHAR',
+          'BOOLEAN',
+          'DATE', 'TIME', 'TIMESTAMP_NTZ', 'TIMESTAMP_LTZ', 'TIMESTAMP_TZ',
+          'VARIANT', 'OBJECT', 'ARRAY', 'BINARY'
+        ],
+        bigquery: [
+          'INT64', 'NUMERIC', 'NUMERIC(10, 2)', 'BIGNUMERIC', 'FLOAT64',
+          'STRING', 'BOOL', 'BOOLEAN',
+          'DATE', 'TIME', 'DATETIME', 'TIMESTAMP',
+          'BYTES', 'JSON', 'GEOGRAPHY',
+          'ARRAY<STRING>', 'ARRAY<INT64>', 'STRUCT'
+        ],
+        databricks: [
+          'BIGINT', 'INT', 'SMALLINT', 'TINYINT',
+          'STRING', 'VARCHAR', 'VARCHAR(255)', 'CHAR',
+          'BOOLEAN', 'DECIMAL', 'DECIMAL(10, 2)', 'DOUBLE', 'FLOAT',
+          'DATE', 'TIMESTAMP', 'TIMESTAMP_NTZ',
+          'BINARY', 'ARRAY<STRING>', 'MAP<STRING, STRING>', 'STRUCT', 'VARIANT'
+        ],
+        clickhouse: [
+          'Int8', 'Int16', 'Int32', 'Int64', 'UInt8', 'UInt16', 'UInt32', 'UInt64',
+          'String', 'FixedString', 'FixedString(32)',
+          'Bool', 'Decimal', 'Decimal(10, 2)', 'Float32', 'Float64',
+          'Date', 'Date32', 'DateTime', 'DateTime64', 'DateTime64(3)',
+          'UUID', 'Array(String)', 'Nullable(String)', 'LowCardinality(String)', 'JSON'
+        ],
+        cassandra: [
+          'ascii', 'text', 'varchar',
+          'bigint', 'int', 'smallint', 'tinyint', 'varint',
+          'boolean', 'decimal', 'double', 'float',
+          'date', 'time', 'timestamp', 'duration',
+          'uuid', 'timeuuid', 'inet', 'blob',
+          'list<text>', 'set<text>', 'map<text, text>'
+        ]
+      };
+      return hints[driver] || ['BIGINT', 'INTEGER', 'VARCHAR', 'VARCHAR(255)', 'TEXT', 'BOOLEAN', 'DECIMAL', 'DECIMAL(10, 2)', 'DATE', 'TIME', 'TIMESTAMP', 'JSON', 'BLOB'];
+    }
+
+    function ensureTypeHintList() {
+      if (document.getElementById('columnTypeHints')) return;
+      const list = document.createElement('datalist');
+      list.id = 'columnTypeHints';
+      list.innerHTML = typeHints.map(type => '<option value="' + escapeAttribute(type) + '"></option>').join('');
+      document.body.appendChild(list);
+    }
+
+    function parseTypeInput(value) {
+      const text = normalizeName(value);
+      const match = text.match(/^(.+?)\\s*\\(([^)]*)\\)$/);
+      if (!match) {
+        return { type: text, length: undefined, decimals: undefined };
+      }
+
+      const parts = match[2].split(',').map(part => part.trim());
+      return {
+        type: match[1].trim(),
+        length: parts[0] || '',
+        decimals: parts[1] || ''
+      };
+    }
+
+    function getTypeDefaults(type) {
+      const normalized = String(type || '').toLowerCase().replace(/\\s+/g, ' ');
+      if (/^(varchar|nvarchar|varchar2|nvarchar2|character varying)$/.test(normalized)) {
+        return { length: '255', decimals: '' };
+      }
+      if (/^(char|nchar|character|fixedstring|raw|varbinary|binary)$/.test(normalized)) {
+        return { length: normalized === 'fixedstring' ? '32' : '1', decimals: '' };
+      }
+      if (/^(decimal|numeric|number|bignumeric)$/.test(normalized)) {
+        return { length: '10', decimals: '2' };
+      }
+      if (/^(datetime64|timestamp_ntz|timestamp_ltz|timestamp_tz|datetime2)$/.test(normalized)) {
+        return { length: '3', decimals: '' };
+      }
+      if (/^(tinyint)$/.test(normalized)) {
+        return { length: '1', decimals: '' };
+      }
+      return { length: '', decimals: '' };
+    }
+
+    function applyTypeInput(column, value) {
+      const parsed = parseTypeInput(value);
+      const defaults = getTypeDefaults(parsed.type);
+      column.type = parsed.type;
+      column.length = parsed.length === undefined ? defaults.length : parsed.length;
+      column.decimals = parsed.decimals === undefined ? defaults.decimals : parsed.decimals;
     }
 
     function composeType(column) {
@@ -1021,6 +1164,12 @@ export class TableSchemaPanel {
       if (field === 'key') {
         editor.innerHTML = '<option value=""></option><option value="primary">' + escapeHtml(labels.primaryKey) + '</option>';
         editor.value = column.isPrimaryKey ? 'primary' : '';
+      } else if (field === 'type') {
+        ensureTypeHintList();
+        editor.setAttribute('list', 'columnTypeHints');
+        editor.setAttribute('autocomplete', 'off');
+        editor.placeholder = typeHints.slice(0, 6).join(', ');
+        editor.value = column.type || '';
       } else {
         editor.value = field === 'defaultValue' || field === 'comment'
           ? (column[field] || '')
@@ -1041,7 +1190,11 @@ export class TableSchemaPanel {
             if (column.isPrimaryKey) column.nullable = false;
           } else if (field === 'name' || field === 'type' || field === 'length' || field === 'decimals' || field === 'defaultValue' || field === 'comment') {
             const previousName = column.name;
-            column[field] = editor.value.trim();
+            if (field === 'type') {
+              applyTypeInput(column, editor.value);
+            } else {
+              column[field] = editor.value.trim();
+            }
             if (field === 'name' && previousName !== column.name) {
               draftIndexes = draftIndexes.map(index => ({
                 ...index,
