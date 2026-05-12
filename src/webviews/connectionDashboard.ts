@@ -138,6 +138,12 @@ export class ConnectionDashboard {
         }
         break
 
+      case 'copyConnectionUrl':
+        if (message.id) {
+          await commands.executeCommand('dbNexus.copyConnectionUrl', message.id)
+        }
+        break
+
       case 'testDraftConnection':
         if (message.profile) {
           await this._testDraftConnection(message.profile, message.password, message.requestId)
@@ -414,6 +420,7 @@ export class ConnectionDashboard {
       query: icon('<path fill="currentColor" d="M2 3.5A1.5 1.5 0 0 1 3.5 2h9A1.5 1.5 0 0 1 14 3.5v9a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12.5v-9Zm1.5 0v9h9v-9h-9Zm1.4 2.1 1-.9 2.1 2.1-2.1 2.1-1-.9 1.2-1.2-1.2-1.2Zm3.8 4.5h3.1v1.3H8.7v-1.3Z"/>'),
       test: icon('<path fill="currentColor" d="M6.8 1.8h2.4v1.4l3.9 6.6A2.8 2.8 0 0 1 10.7 14H5.3a2.8 2.8 0 0 1-2.4-4.2l3.9-6.6V1.8Zm1.4 2.1H7.8L4.1 10.5A1.4 1.4 0 0 0 5.3 12.6h5.4a1.4 1.4 0 0 0 1.2-2.1L8.2 3.9ZM5.4 9.7h5.2l.8 1.4H4.6l.8-1.4Z"/>'),
       link: icon('<path fill="currentColor" d="M6.2 10.9 5.1 12a2.2 2.2 0 0 1-3.1-3.1l2.2-2.2a2.2 2.2 0 0 1 3.1 0l.6.6-1.1 1.1-.6-.6a.7.7 0 0 0-1 0L3 10a.7.7 0 0 0 1 1l1.1-1.1 1.1 1Zm-.4-2 3.1-3.1 1.1 1.1L6.9 10 5.8 8.9Zm2.3-.2-.6-.6 1.1-1.1.6.6a.7.7 0 0 0 1 0L12.4 5.4a.7.7 0 0 0-1-1l-1.1 1.1-1.1-1.1 1.1-1.1a2.2 2.2 0 0 1 3.1 3.1l-2.2 2.2a2.2 2.2 0 0 1-3.1.1Z"/>'),
+      copy: icon('<path fill="currentColor" d="M5 1.5h7.5V11H11V3H5V1.5Zm-1.5 3h7.5V14H3.5V4.5Zm1.5 1.5v6.5h4.5V6H5Z"/>'),
       edit: icon('<path fill="currentColor" d="m11.7 1.7 2.6 2.6-7.9 7.9-3.3.7.7-3.3 7.9-7.9ZM4.9 10.3l-.2.9.9-.2 6.7-6.7-.7-.7-6.7 6.7Z"/>'),
       delete: icon('<path fill="currentColor" d="M6.5 1h3l.7 1.5H14V4H2V2.5h3.8L6.5 1ZM3.2 5h9.6l-.7 9H3.9l-.7-9Zm2 1.4.4 6.2H7L6.6 6.4H5.2Zm3.8 0-.4 6.2H10l.4-6.2H9Z"/>'),
       server: icon('<path fill="currentColor" d="M3 2h10a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1Zm0 7h10a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1Zm1.2-5.2v1.4h1.4V3.8H4.2Zm0 7v1.4h1.4v-1.4H4.2Z"/>')
@@ -478,6 +485,7 @@ export class ConnectionDashboard {
               <button class="btn primary" data-action="connect" data-id="${id}">${icons.connect}<span>${t('dashboard.actions.connect')}</span></button>
             `}
             <button class="btn" data-action="testConnection" data-id="${id}">${icons.test}<span>${t('dashboard.actions.test')}</span></button>
+            <button class="icon-btn" data-action="copyConnectionUrl" data-id="${id}" title="${t('dashboard.actions.copyUrl')}">${icons.copy}</button>
             <button class="icon-btn" data-action="editConnection" data-id="${id}" title="${t('dashboard.actions.edit')}">${icons.edit}</button>
             <button class="icon-btn danger" data-action="deleteConnection" data-id="${id}" title="${t('dashboard.actions.delete')}">${icons.delete}</button>
           </footer>
@@ -864,6 +872,7 @@ export class ConnectionDashboard {
       editConnection: function(id) { vscode.postMessage({ type: 'editConnection', id: id }); },
       deleteConnection: function(id) { vscode.postMessage({ type: 'deleteConnection', id: id }); },
       testConnection: function(id) { vscode.postMessage({ type: 'testConnection', id: id }); },
+      copyConnectionUrl: function(id) { vscode.postMessage({ type: 'copyConnectionUrl', id: id }); },
       connect: function(id) { vscode.postMessage({ type: 'connect', id: id }); },
       disconnect: function(id) { vscode.postMessage({ type: 'disconnect', id: id }); },
       openQuery: function(id) { vscode.postMessage({ type: 'openQuery', id: id }); }

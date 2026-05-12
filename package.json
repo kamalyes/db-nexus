@@ -32,6 +32,7 @@
     "onCommand:dbNexus.openDashboard",
     "onCommand:dbNexus.addConnection",
     "onCommand:dbNexus.addConnectionFromUrl",
+    "onCommand:dbNexus.copyConnectionUrl",
     "onCommand:dbNexus.refreshConnections",
     "onCommand:dbNexus.connectConnection",
     "onCommand:dbNexus.disconnectConnection",
@@ -62,6 +63,12 @@
         "title": "%dbNexus.addConnectionFromUrl.title%",
         "category": "%dbNexus.category%",
         "icon": "$(link)"
+      },
+      {
+        "command": "dbNexus.copyConnectionUrl",
+        "title": "%dbNexus.copyConnectionUrl.title%",
+        "category": "%dbNexus.category%",
+        "icon": "$(copy)"
       },
       {
         "command": "dbNexus.refreshConnections",
@@ -430,6 +437,11 @@
           "command": "dbNexus.testConnection",
           "when": "view == dbNexus.connections && viewItem =~ /^connection/",
           "group": "1_connection@2"
+        },
+        {
+          "command": "dbNexus.copyConnectionUrl",
+          "when": "view == dbNexus.connections && viewItem =~ /^connection/",
+          "group": "2_copy@1"
         },
         {
           "command": "dbNexus.editConnection",

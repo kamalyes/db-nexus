@@ -5,6 +5,7 @@
   "dbNexus.openDashboard.title": "打开连接管理面板",
   "dbNexus.addConnection.title": "添加连接",
   "dbNexus.addConnectionFromUrl.title": "通过 URL 添加连接",
+  "dbNexus.copyConnectionUrl.title": "\u590d\u5236\u8fde\u63a5 URL",
   "dbNexus.refreshConnections.title": "刷新连接",
   "dbNexus.testConnection.title": "测试连接",
   "dbNexus.connectConnection.title": "连接",

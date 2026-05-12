@@ -5,6 +5,7 @@
   "dbNexus.openDashboard.title": "Open Connection Dashboard",
   "dbNexus.addConnection.title": "Add Connection",
   "dbNexus.addConnectionFromUrl.title": "Add Connection from URL",
+  "dbNexus.copyConnectionUrl.title": "Copy Connection URL",
   "dbNexus.refreshConnections.title": "Refresh Connections",
   "dbNexus.testConnection.title": "Test Connection",
   "dbNexus.connectConnection.title": "Connect",

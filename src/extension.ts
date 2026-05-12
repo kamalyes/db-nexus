@@ -1,5 +1,5 @@
 import { ExtensionContext, ProgressLocation, TreeItemCollapsibleState, Uri, commands, env, window, workspace } from 'vscode'
-import { parseConnectionUrl } from '@/core/connectionUrl'
+import { buildConnectionUrl, parseConnectionUrl } from '@/core/connectionUrl'
 import { ConnectionStore } from '@/core/connectionStore'
 import { SUPPORTED_DRIVERS } from '@/core/constants'
 import { ConnectionTestResult, DatabaseDriverId, DbConnectionProfile, SchemaObject, SchemaScope, TableSchema } from '@/core/types'
@@ -505,6 +505,16 @@ export async function activate(context: ExtensionContext): Promise<void> {
     }
   }
 
+  const copyConnectionUrl = async (
+    target?: ConnectionNode | DbConnectionProfile | string
+  ): Promise<void> => {
+    const profile = await resolveConnectionProfile(target)
+    if (!profile) return
+
+    await env.clipboard.writeText(buildConnectionUrl(profile))
+    window.showInformationMessage(t('connection.urlCopied'))
+  }
+
   const connectConnection = async (
     target?: ConnectionNode | DbConnectionProfile | string
   ): Promise<boolean> => {
@@ -599,6 +609,9 @@ export async function activate(context: ExtensionContext): Promise<void> {
     }),
     commands.registerCommand('dbNexus.addConnectionFromUrl', async (connectionUrl?: string) => {
       await addConnectionFromUrl(connectionUrl)
+    }),
+    commands.registerCommand('dbNexus.copyConnectionUrl', async (target?: ConnectionNode | DbConnectionProfile | string) => {
+      await copyConnectionUrl(target)
     }),
     commands.registerCommand('dbNexus.openDashboard', () => {
       ConnectionDashboard.show(context, connectionStore, driverRegistry)

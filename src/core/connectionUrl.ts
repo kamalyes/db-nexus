@@ -7,6 +7,10 @@ export interface ParsedConnectionUrl {
   password?: string
 }
 
+export interface BuildConnectionUrlOptions {
+  password?: string
+}
+
 const DRIVER_ALIASES: Record<string, DatabaseDriverId> = {
   postgres: 'postgresql',
   postgresql: 'postgresql',
@@ -102,6 +106,7 @@ export function parseConnectionUrl(input: string): ParsedConnectionUrl {
     readTimeout: toOptionalNumber(params.get('readTimeout')),
     writeTimeout: toOptionalNumber(params.get('writeTimeout')),
     useCompression: toOptionalBoolean(params.get('compression') || params.get('useCompression')),
+    autoConnect: toOptionalBoolean(params.get('autoConnect')),
     initialQuery: params.get('initialQuery') || undefined,
     note: params.get('note') || undefined
   }
@@ -110,6 +115,53 @@ export function parseConnectionUrl(input: string): ParsedConnectionUrl {
     profile: compactProfile(profile),
     password
   }
+}
+
+export function buildConnectionUrl(profile: DbConnectionProfile, options: BuildConnectionUrlOptions = {}): string {
+  const params = new URLSearchParams()
+  addCommonConnectionParams(params, profile)
+
+  if (FILE_DRIVERS.has(profile.driverId)) {
+    params.set('driver', profile.driverId)
+    if (profile.filePath) {
+      params.set('path', profile.filePath)
+    }
+    return `dbnexus://local?${params.toString()}`
+  }
+
+  if (!profile.host) {
+    params.set('driver', profile.driverId)
+    if (profile.port !== undefined) {
+      params.set('port', String(profile.port))
+    }
+    if (profile.database) {
+      params.set('database', profile.database)
+    }
+    if (profile.username) {
+      params.set('username', profile.username)
+    }
+    if (options.password) {
+      params.set('password', options.password)
+    }
+    return `dbnexus:///?${params.toString()}`
+  }
+
+  const url = new URL(`${profile.driverId}://db-nexus.local`)
+  url.hostname = profile.host
+  if (profile.port !== undefined) {
+    url.port = String(profile.port)
+  }
+  if (profile.username) {
+    url.username = profile.username
+  }
+  if (options.password) {
+    url.password = options.password
+  }
+  if (profile.database) {
+    url.pathname = `/${profile.database}`
+  }
+  url.search = params.toString()
+  return url.toString()
 }
 
 function normalizeConnectionUrl(raw: string): string {
@@ -239,6 +291,43 @@ function toOptionalBoolean(value: string | null | undefined): boolean | undefine
     return undefined
   }
   return ['1', 'true', 'yes', 'on', 'require', 'required'].includes(value.toLowerCase())
+}
+
+function addCommonConnectionParams(params: URLSearchParams, profile: DbConnectionProfile): void {
+  params.set('name', profile.name)
+  if (profile.ssl !== undefined) {
+    params.set('ssl', String(profile.ssl))
+  }
+  if (profile.clientDriver) {
+    params.set('clientDriver', profile.clientDriver)
+  }
+  if (profile.charset) {
+    params.set('charset', profile.charset)
+  }
+  if (profile.keepAliveInterval !== undefined) {
+    params.set('keepAliveInterval', String(profile.keepAliveInterval))
+  }
+  if (profile.connectTimeout !== undefined) {
+    params.set('connectTimeout', String(profile.connectTimeout))
+  }
+  if (profile.readTimeout !== undefined) {
+    params.set('readTimeout', String(profile.readTimeout))
+  }
+  if (profile.writeTimeout !== undefined) {
+    params.set('writeTimeout', String(profile.writeTimeout))
+  }
+  if (profile.useCompression !== undefined) {
+    params.set('compression', String(profile.useCompression))
+  }
+  if (profile.autoConnect !== undefined) {
+    params.set('autoConnect', String(profile.autoConnect))
+  }
+  if (profile.initialQuery) {
+    params.set('initialQuery', profile.initialQuery)
+  }
+  if (profile.note) {
+    params.set('note', profile.note)
+  }
 }
 
 function compactProfile(profile: Omit<DbConnectionProfile, 'id' | 'createdAt' | 'updatedAt'>): Omit<DbConnectionProfile, 'id' | 'createdAt' | 'updatedAt'> {

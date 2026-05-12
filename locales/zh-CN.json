@@ -16,6 +16,7 @@
       "disconnect": "断开",
       "test": "测试",
       "query": "查询",
+      "copyUrl": "\u590d\u5236 URL",
       "edit": "编辑",
       "delete": "删除"
     }
@@ -49,6 +50,7 @@
     "openDatabase": "打开数据库",
     "urlPrompt": "粘贴数据库连接 URL",
     "urlInvalid": "连接 URL 无效：{0}",
+    "urlCopied": "\u8fde\u63a5 URL \u5df2\u590d\u5236\u5230\u526a\u8d34\u677f\uff08\u4e0d\u5305\u542b\u5bc6\u7801\uff09",
     "deleteConfirm": "确定要删除连接 '{0}' 吗？",
     "deleted": "连接已删除：{0}",
     "updated": "连接已更新：{0}",

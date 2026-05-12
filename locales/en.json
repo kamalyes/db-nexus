@@ -16,6 +16,7 @@
       "disconnect": "Disconnect",
       "test": "Test",
       "query": "Query",
+      "copyUrl": "Copy URL",
       "edit": "Edit",
       "delete": "Delete"
     }
@@ -52,6 +53,7 @@
     "openDatabase": "Open Database",
     "urlPrompt": "Paste a database connection URL",
     "urlInvalid": "Invalid connection URL: {0}",
+    "urlCopied": "Connection URL copied to clipboard (password not included)",
     "deleteConfirm": "Are you sure you want to delete connection '{0}'?",
     "deleted": "Connection deleted: {0}",
     "updated": "Connection updated: {0}",
