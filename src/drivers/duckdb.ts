@@ -133,7 +133,17 @@ export class DuckDBDriver implements DatabaseDriver {
     const start = Date.now()
     const conn = await this.getConnection(profile)
     
-    const result = await conn.execute(request.sql)
+    let sql = request.sql.trim()
+    
+    // 如果请求指定了 limit，且 SQL 中没有 LIMIT 子句，则自动追加
+    if (request.limit && request.limit > 0) {
+      const limitRegex = /\s+LIMIT\s+\d+/i
+      if (!limitRegex.test(sql)) {
+        sql += ` LIMIT ${request.limit}`
+      }
+    }
+    
+    const result = await conn.execute(sql)
     
     const columns = result.columns.map(col => ({
       name: col,

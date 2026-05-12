@@ -128,7 +128,17 @@ export class SQLiteDriver implements DatabaseDriver {
     const db = await this.getConnection(profile)
 
     try {
-      const result = db.exec(request.sql)
+      let sql = request.sql.trim()
+      
+      // 如果请求指定了 limit，且 SQL 中没有 LIMIT 子句，则自动追加
+      if (request.limit && request.limit > 0) {
+        const limitRegex = /\s+LIMIT\s+\d+/i
+        if (!limitRegex.test(sql)) {
+          sql += ` LIMIT ${request.limit}`
+        }
+      }
+      
+      const result = db.exec(sql)
       
       if (result.length === 0) {
         return {
