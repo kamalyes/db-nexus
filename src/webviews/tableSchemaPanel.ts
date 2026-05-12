@@ -2,12 +2,16 @@ import { ExtensionContext, ViewColumn, window } from 'vscode'
 import { DbConnectionProfile, SchemaObject, SchemaScope, TableColumn, TableSchema } from '../core/types'
 import { t } from '../i18n'
 
+type TableSchemaTab = 'fields' | 'indexes' | 'foreignKeys' | 'checks' | 'triggers' | 'options' | 'comment' | 'sql'
+
 interface TableSchemaPanelContext {
   profile?: DbConnectionProfile
   scope?: SchemaScope
   objectType?: SchemaObject['type']
   rowCount?: number
   description?: string
+  initialTab?: TableSchemaTab
+  selectedIndexName?: string
 }
 
 export class TableSchemaPanel {
@@ -37,6 +41,8 @@ export class TableSchemaPanel {
     const objectType = panelContext.objectType || 'table'
     const metadata = schema.metadata || {}
     const qualifiedName = getQualifiedName(profile, scope, schema.name)
+    const initialTab = panelContext.initialTab || 'fields'
+    const selectedIndexName = panelContext.selectedIndexName
     const primaryKeys = schema.columns.filter(column => column.isPrimaryKey).map(column => column.name)
     const autoIncrementColumns = schema.columns.filter(column => column.isAutoIncrement).map(column => column.name)
     const nullableColumns = schema.columns.filter(column => column.nullable).length
@@ -73,7 +79,7 @@ export class TableSchemaPanel {
     }).join('')
 
     const indexRowsHtml = schema.indexes.map(index => `
-      <tr>
+      <tr class="index-row ${index.name === selectedIndexName ? 'selected' : ''}" data-index="${escapeAttribute(index.name)}">
         <td>${escapeHtml(index.name)}</td>
         <td>${escapeHtml(index.columns.join(', '))}</td>
         <td class="check-cell"><input type="checkbox" disabled ${index.isUnique ? 'checked' : ''}></td>
@@ -399,18 +405,18 @@ export class TableSchemaPanel {
       </div>
 
       <nav class="tabs" aria-label="Table schema tabs">
-        <button class="tab active" data-tab="fields">${t('table.columns')}</button>
-        <button class="tab" data-tab="indexes">${t('table.indexes')}</button>
-        <button class="tab" data-tab="foreignKeys">${t('table.foreignKeys')}</button>
-        <button class="tab" data-tab="checks">${t('table.checks')}</button>
-        <button class="tab" data-tab="triggers">${t('table.triggers')}</button>
-        <button class="tab" data-tab="options">${t('table.options')}</button>
-        <button class="tab" data-tab="comment">${t('table.comment')}</button>
-        <button class="tab" data-tab="sql">${t('table.sqlPreview')}</button>
+        <button class="tab ${getActiveClass(initialTab, 'fields')}" data-tab="fields">${t('table.columns')}</button>
+        <button class="tab ${getActiveClass(initialTab, 'indexes')}" data-tab="indexes">${t('table.indexes')}</button>
+        <button class="tab ${getActiveClass(initialTab, 'foreignKeys')}" data-tab="foreignKeys">${t('table.foreignKeys')}</button>
+        <button class="tab ${getActiveClass(initialTab, 'checks')}" data-tab="checks">${t('table.checks')}</button>
+        <button class="tab ${getActiveClass(initialTab, 'triggers')}" data-tab="triggers">${t('table.triggers')}</button>
+        <button class="tab ${getActiveClass(initialTab, 'options')}" data-tab="options">${t('table.options')}</button>
+        <button class="tab ${getActiveClass(initialTab, 'comment')}" data-tab="comment">${t('table.comment')}</button>
+        <button class="tab ${getActiveClass(initialTab, 'sql')}" data-tab="sql">${t('table.sqlPreview')}</button>
       </nav>
 
       <section class="content">
-        <div class="tab-panel active" id="tab-fields">
+        <div class="tab-panel ${getActiveClass(initialTab, 'fields')}" id="tab-fields">
           <table>
             <thead>
               <tr>
@@ -429,7 +435,7 @@ export class TableSchemaPanel {
           </table>
         </div>
 
-        <div class="tab-panel" id="tab-indexes">
+        <div class="tab-panel ${getActiveClass(initialTab, 'indexes')}" id="tab-indexes">
           ${schema.indexes.length > 0 ? `
             <table>
               <thead>
@@ -445,7 +451,7 @@ export class TableSchemaPanel {
           ` : `<div class="empty">${t('table.noIndexes')}</div>`}
         </div>
 
-        <div class="tab-panel" id="tab-foreignKeys">
+        <div class="tab-panel ${getActiveClass(initialTab, 'foreignKeys')}" id="tab-foreignKeys">
           ${schema.foreignKeys.length > 0 ? `
             <table>
               <thead>
@@ -462,9 +468,9 @@ export class TableSchemaPanel {
           ` : `<div class="empty">${t('table.noForeignKeys')}</div>`}
         </div>
 
-        <div class="tab-panel" id="tab-checks"><div class="empty">${t('table.notSupportedYet')}</div></div>
-        <div class="tab-panel" id="tab-triggers"><div class="empty">${t('table.notSupportedYet')}</div></div>
-        <div class="tab-panel" id="tab-options">
+        <div class="tab-panel ${getActiveClass(initialTab, 'checks')}" id="tab-checks"><div class="empty">${t('table.notSupportedYet')}</div></div>
+        <div class="tab-panel ${getActiveClass(initialTab, 'triggers')}" id="tab-triggers"><div class="empty">${t('table.notSupportedYet')}</div></div>
+        <div class="tab-panel ${getActiveClass(initialTab, 'options')}" id="tab-options">
           ${renderInfoSection('', [
             [t('table.engine'), metadata.engine],
             [t('table.rowFormat'), metadata.rowFormat],
@@ -474,10 +480,10 @@ export class TableSchemaPanel {
             [t('table.indexLength'), formatBytes(metadata.indexLength)]
           ])}
         </div>
-        <div class="tab-panel" id="tab-comment">
+        <div class="tab-panel ${getActiveClass(initialTab, 'comment')}" id="tab-comment">
           <div class="comment">${escapeHtml(formatEmpty(schema.comment))}</div>
         </div>
-        <div class="tab-panel" id="tab-sql">
+        <div class="tab-panel ${getActiveClass(initialTab, 'sql')}" id="tab-sql">
           <pre class="sql-preview">${escapeHtml(String(metadata.createSql || buildCreateTablePreview(profile, scope, schema)))}</pre>
         </div>
       </section>
@@ -509,13 +515,23 @@ export class TableSchemaPanel {
 
   <script>
     const columnDetails = ${escapeScriptJson(JSON.stringify(columnDetails))};
+    const initialTab = ${escapeScriptJson(JSON.stringify(initialTab))};
+    const selectedIndexName = ${escapeScriptJson(JSON.stringify(selectedIndexName || null))};
+
+    function activateTab(tabName) {
+      const tab = document.querySelector('.tab[data-tab="' + tabName + '"]');
+      const panel = document.getElementById('tab-' + tabName);
+      if (!tab || !panel) return;
+
+      document.querySelectorAll('.tab').forEach(item => item.classList.remove('active'));
+      document.querySelectorAll('.tab-panel').forEach(item => item.classList.remove('active'));
+      tab.classList.add('active');
+      panel.classList.add('active');
+    }
 
     document.querySelectorAll('.tab').forEach(tab => {
       tab.addEventListener('click', () => {
-        document.querySelectorAll('.tab').forEach(item => item.classList.remove('active'));
-        document.querySelectorAll('.tab-panel').forEach(item => item.classList.remove('active'));
-        tab.classList.add('active');
-        document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+        activateTab(tab.dataset.tab);
       });
     });
 
@@ -540,10 +556,24 @@ export class TableSchemaPanel {
     if (columnDetails.length > 0) {
       updateColumnInfo(columnDetails[0].name);
     }
+
+    activateTab(initialTab);
+
+    if (selectedIndexName) {
+      const selectedIndexRow = Array.from(document.querySelectorAll('.index-row'))
+        .find(row => row.dataset.index === selectedIndexName);
+      if (selectedIndexRow) {
+        selectedIndexRow.scrollIntoView({ block: 'center' });
+      }
+    }
   </script>
 </body>
 </html>`
   }
+}
+
+function getActiveClass(activeTab: TableSchemaTab, tab: TableSchemaTab): string {
+  return activeTab === tab ? 'active' : ''
 }
 
 function renderInfoSection(title: string, rows: Array<[string, unknown]>): string {

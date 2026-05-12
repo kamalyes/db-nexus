@@ -35,6 +35,7 @@
   "dbNexus.createIndex.title": "新建索引",
   "dbNexus.dropIndex.title": "删除索引",
   "dbNexus.copyIndexName.title": "复制索引名",
+  "dbNexus.modifyIndex.title": "修改索引",
   "dbNexus.deleteTable.title": "删除表",
   "dbNexus.importWizard.title": "导入向导...",
   "dbNexus.exportWizard.title": "导出向导...",

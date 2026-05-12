@@ -35,6 +35,7 @@
   "dbNexus.createIndex.title": "Create Index",
   "dbNexus.dropIndex.title": "Drop Index",
   "dbNexus.copyIndexName.title": "Copy Index Name",
+  "dbNexus.modifyIndex.title": "Modify Index",
   "dbNexus.deleteTable.title": "Delete Table",
   "dbNexus.importWizard.title": "Import Wizard...",
   "dbNexus.exportWizard.title": "Export Wizard...",

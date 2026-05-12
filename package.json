@@ -215,6 +215,11 @@
         "category": "%dbNexus.category%"
       },
       {
+        "command": "dbNexus.modifyIndex",
+        "title": "%dbNexus.modifyIndex.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
         "command": "dbNexus.deleteTable",
         "title": "%dbNexus.deleteTable.title%",
         "category": "%dbNexus.category%"
@@ -554,9 +559,14 @@
           "group": "2_copy@1"
         },
         {
-          "command": "dbNexus.dropIndex",
+          "command": "dbNexus.modifyIndex",
           "when": "view == dbNexus.connections && viewItem == index",
           "group": "3_index@1"
+        },
+        {
+          "command": "dbNexus.dropIndex",
+          "when": "view == dbNexus.connections && viewItem == index",
+          "group": "3_index@2"
         },
         {
           "command": "dbNexus.showTableList",

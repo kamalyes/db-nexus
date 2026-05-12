@@ -30,6 +30,8 @@ type TableTarget = {
   scope: SchemaScope
   tableName: string
   objectType: SchemaObject['type']
+  rowCount?: number
+  description?: string
 }
 
 type FieldTarget = {
@@ -39,6 +41,8 @@ type FieldTarget = {
   columnName: string
   columnType: string
 }
+
+type TableSchemaTab = 'fields' | 'indexes' | 'foreignKeys' | 'checks' | 'triggers' | 'options' | 'comment' | 'sql'
 
 export function activate(context: ExtensionContext): void {
   initI18n(context.extensionPath)
@@ -81,7 +85,9 @@ export function activate(context: ExtensionContext): void {
         profile: node.connectionProfile,
         scope: node.scope || {},
         tableName: node.schemaObject.name,
-        objectType: node.schemaObject.type
+        objectType: node.schemaObject.type,
+        rowCount: node.schemaObject.rowCount,
+        description: node.schemaObject.description
       }
     }
 
@@ -128,7 +134,9 @@ export function activate(context: ExtensionContext): void {
       profile: dbContext.profile,
       scope: dbContext.scope,
       tableName: picked.table.name,
-      objectType: picked.table.type
+      objectType: picked.table.type,
+      rowCount: picked.table.rowCount,
+      description: picked.table.description
     }
   }
 
@@ -314,6 +322,32 @@ export function activate(context: ExtensionContext): void {
     await window.showTextDocument(document)
   }
 
+  const showTableSchemaForTarget = async (
+    target: TableTarget,
+    options: { initialTab?: TableSchemaTab; selectedIndexName?: string } = {}
+  ): Promise<void> => {
+    const driver = driverRegistry.getDriver(target.profile.driverId)
+    if (!driver?.getTableSchema) {
+      window.showErrorMessage(t('table.schemaNotSupported'))
+      return
+    }
+
+    try {
+      const schema = await driver.getTableSchema(target.profile, target.tableName, target.scope)
+      TableSchemaPanel.show(context, t('table.schemaTitle', schema.name), schema, {
+        profile: target.profile,
+        scope: target.scope,
+        objectType: target.objectType,
+        rowCount: target.rowCount,
+        description: target.description,
+        ...options
+      })
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      window.showErrorMessage(t('table.schemaFailed', message))
+    }
+  }
+
   context.subscriptions.push(
     outputChannel,
     window.createTreeView('dbNexus.connections', {
@@ -456,26 +490,14 @@ export function activate(context: ExtensionContext): void {
         return
       }
 
-      const profile = node.connectionProfile
-      const driver = driverRegistry.getDriver(profile.driverId)
-      if (!driver?.getTableSchema) {
-        window.showErrorMessage(t('table.schemaNotSupported'))
-        return
-      }
-
-      try {
-        const schema = await driver.getTableSchema(profile, node.schemaObject.name, node.scope || {})
-        TableSchemaPanel.show(context, t('table.schemaTitle', schema.name), schema, {
-          profile,
-          scope: node.scope || {},
-          objectType: node.schemaObject.type,
-          rowCount: node.schemaObject.rowCount,
-          description: node.schemaObject.description
-        })
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error)
-        window.showErrorMessage(t('table.schemaFailed', message))
-      }
+      await showTableSchemaForTarget({
+        profile: node.connectionProfile,
+        scope: node.scope || {},
+        tableName: node.schemaObject.name,
+        objectType: node.schemaObject.type,
+        rowCount: node.schemaObject.rowCount,
+        description: node.schemaObject.description
+      })
     }),
     commands.registerCommand('dbNexus.showTableData', async (node: SchemaNode | undefined) => {
       if (!node || !isTableLikeNode(node)) {
@@ -764,6 +786,22 @@ export function activate(context: ExtensionContext): void {
       if (!target) return
       await env.clipboard.writeText(quoteSqlIdentifier(target.profile.driverId, target.columnName))
       window.showInformationMessage(t('table.copied'))
+    }),
+    commands.registerCommand('dbNexus.modifyIndex', async (node: IndexNode | undefined) => {
+      if (!node) {
+        window.showWarningMessage(t('table.selectIndex'))
+        return
+      }
+
+      await showTableSchemaForTarget({
+        profile: node.connectionProfile,
+        scope: node.scope || {},
+        tableName: node.tableName,
+        objectType: 'table'
+      }, {
+        initialTab: 'indexes',
+        selectedIndexName: node.index.name
+      })
     }),
     commands.registerCommand('dbNexus.createIndex', async (node: SchemaNode | TableDetailGroupNode | undefined) => {
       const target = await resolveTableTarget(node)
