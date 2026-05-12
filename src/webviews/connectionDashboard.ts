@@ -14,6 +14,7 @@ interface ConnectionDashboardMessage {
   profile?: Partial<DbConnectionProfile>
   password?: string
   savePassword?: boolean
+  requestId?: number
 }
 
 export class ConnectionDashboard {
@@ -119,7 +120,7 @@ export class ConnectionDashboard {
 
       case 'testDraftConnection':
         if (message.profile) {
-          await this._testDraftConnection(message.profile, message.password)
+          await this._testDraftConnection(message.profile, message.password, message.requestId)
         }
         break
 
@@ -264,7 +265,7 @@ export class ConnectionDashboard {
     }
   }
 
-  private async _testDraftConnection(profileData: Partial<DbConnectionProfile>, password?: string): Promise<void> {
+  private async _testDraftConnection(profileData: Partial<DbConnectionProfile>, password?: string, requestId?: number): Promise<void> {
     const registry = ConnectionDashboard._driverRegistry!
     const driverId = profileData.driverId || 'mysql'
     const shouldUseTempProfile = !!password || !profileData.id
@@ -280,10 +281,19 @@ export class ConnectionDashboard {
     try {
       const result = await driver.testConnection(profile)
       if (result.ok) {
-        window.showInformationMessage(t('connection.testSuccess', String(result.latencyMs || 0)))
+        const message = t('connection.testSuccess', String(result.latencyMs || 0))
+        await this._panel.webview.postMessage({ type: 'draftConnectionTestResult', ok: true, message, requestId })
+        window.showInformationMessage(message)
       } else {
-        window.showErrorMessage(t('connection.testFailed', result.message))
+        const message = t('connection.testFailed', result.message)
+        await this._panel.webview.postMessage({ type: 'draftConnectionTestResult', ok: false, message, requestId })
+        window.showErrorMessage(message)
       }
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : String(error)
+      const message = t('connection.testFailed', detail)
+      await this._panel.webview.postMessage({ type: 'draftConnectionTestResult', ok: false, message, requestId })
+      window.showErrorMessage(message)
     } finally {
       if (password) {
         await secretService.deletePassword(profile.id)
@@ -930,6 +940,9 @@ export class ConnectionDashboard {
     .note { grid-column: 2 / span 2; color: var(--vscode-descriptionForeground, #6b7280); font-size: 12px; padding-bottom: 8px; }
     .textarea { min-height: 180px; resize: vertical; }
     .form-status { min-height: 22px; margin: 12px auto 0; max-width: 860px; color: var(--vscode-descriptionForeground, #6b7280); }
+    .form-status.success { color: var(--vscode-testing-iconPassed, #4caf50); }
+    .form-status.error { color: var(--vscode-errorForeground, #f48771); }
+    .form-status.testing { color: var(--vscode-testing-iconQueued, #fbbf24); }
     .footer {
       height: 52px;
       display: flex;
@@ -1210,6 +1223,7 @@ export class ConnectionDashboard {
     let selectedDriverId = ${JSON.stringify(selectedDriver)};
     let listMode = false;
     let nameWasEdited = isEdit;
+    let activeTestRequestId = 0;
 
     function getDriver(id) {
       return drivers.find(function(driver) { return driver.id === id; }) || drivers[0];
@@ -1294,8 +1308,10 @@ export class ConnectionDashboard {
       document.getElementById('wizardStatus').textContent = text || '';
     }
 
-    function setFormStatus(text) {
-      document.getElementById('formStatus').textContent = text || '';
+    function setFormStatus(text, kind) {
+      const status = document.getElementById('formStatus');
+      status.textContent = text || '';
+      status.className = 'form-status' + (kind ? ' ' + kind : '');
     }
 
     function selectDriver(driverId) {
@@ -1453,18 +1469,21 @@ export class ConnectionDashboard {
       const profile = collectProfile();
       const message = validateProfile(profile);
       if (message) {
-        setFormStatus(message);
+        setFormStatus(message, 'error');
         return;
       }
-      setFormStatus('正在测试连接...');
-      vscode.postMessage({ type: 'testDraftConnection', profile: profile, password: optionalText('password') });
+      activeTestRequestId += 1;
+      const requestId = activeTestRequestId;
+      document.getElementById('testButton').disabled = true;
+      setFormStatus('正在测试连接...', 'testing');
+      vscode.postMessage({ type: 'testDraftConnection', profile: profile, password: optionalText('password'), requestId: requestId });
     });
     document.getElementById('connectionForm').addEventListener('submit', function(event) {
       event.preventDefault();
       const profile = collectProfile();
       const message = validateProfile(profile);
       if (message) {
-        setFormStatus(message);
+        setFormStatus(message, 'error');
         return;
       }
       vscode.postMessage({
@@ -1481,6 +1500,11 @@ export class ConnectionDashboard {
       if (event.data && event.data.type === 'fileSelected') {
         document.getElementById('filePath').value = event.data.filePath || '';
         setFormStatus('');
+      }
+      if (event.data && event.data.type === 'draftConnectionTestResult') {
+        if (event.data.requestId !== undefined && event.data.requestId !== activeTestRequestId) return;
+        document.getElementById('testButton').disabled = false;
+        setFormStatus(event.data.message || '', event.data.ok ? 'success' : 'error');
       }
     });
 
