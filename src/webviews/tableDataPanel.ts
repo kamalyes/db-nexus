@@ -51,6 +51,15 @@ export class TableDataPanel {
     )
   }
 
+  static closeFor(profile: DbConnectionProfile): boolean {
+    if (TableDataPanel.currentPanel?._profile.id !== profile.id) {
+      return false
+    }
+
+    TableDataPanel.currentPanel._panel.dispose()
+    return true
+  }
+
   private constructor(
     panel: WebviewPanel,
     context: ExtensionContext,

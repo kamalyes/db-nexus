@@ -4,6 +4,7 @@ import {
   Event,
   EventEmitter,
   ProviderResult,
+  ThemeColor,
   ThemeIcon,
   TreeDataProvider,
   TreeItem,
@@ -184,6 +185,11 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
     this.onDidChangeTreeDataEmitter.fire(undefined)
   }
 
+  refreshNode(node?: ConnectionNode | SchemaNode | TablesGroupNode | TableDetailGroupNode): void {
+    this.tableSchemaCache.clear()
+    this.onDidChangeTreeDataEmitter.fire(node)
+  }
+
   getTreeItem(element: ConnectionTreeNode): TreeItem {
     if (element instanceof PlaceholderNode) {
       const item = new TreeItem(element.label, TreeItemCollapsibleState.None)
@@ -231,10 +237,11 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
   private getConnectionTreeItem(node: ConnectionNode): TreeItem {
     const item = new TreeItem(node.profile.name, node.collapsibleState)
     const status = connectionStatusManager.getStatus(node.profile.id)
+    const statusType = status?.status || 'disconnected'
     
-    item.description = this.getConnectionDescription(node.profile, status)
+    item.description = this.getConnectionStatusDescription(node.profile, status)
     item.tooltip = this.getConnectionTooltip(node.profile, status)
-    item.iconPath = this.getDriverIcon(node.profile.driverId)
+    item.iconPath = this.getConnectionStatusIcon(statusType)
     item.contextValue = 'connection'
     
     if (status?.status === 'connected') {
@@ -242,6 +249,14 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
     }
     
     return item
+  }
+
+  private getConnectionStatusDescription(profile: DbConnectionProfile, status?: { status: ConnectionStatusType; latency?: number }): string {
+    const parts: string[] = [status?.status || 'disconnected', profile.driverId]
+    if (status?.latency) {
+      parts.push(`${status.latency}ms`)
+    }
+    return parts.join(' ')
   }
 
   private getConnectionDescription(profile: DbConnectionProfile, status?: { status: ConnectionStatusType; latency?: number }): string {
@@ -274,6 +289,8 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
       if (status.error) {
         lines.push(`Error: ${status.error}`)
       }
+    } else if (status?.status === 'connecting') {
+      lines.push('Status: Connecting')
     } else {
       lines.push('Status: Disconnected')
     }
@@ -473,6 +490,11 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
 
   private async getConnectionChildren(node: ConnectionNode): Promise<ConnectionTreeNode[]> {
     try {
+      const status = connectionStatusManager.getStatus(node.profile.id)
+      if (status?.status !== 'connected') {
+        return [new PlaceholderNode(t('dashboard.statusDisconnected'))]
+      }
+
       if (this.shouldShowDatabaseCatalog(node.profile.driverId)) {
         const databases = await this.connectionService.listDatabases(node.profile)
         if (databases.length > 0) {
@@ -695,6 +717,18 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
       return Uri.file(path.join(this.extensionPath, 'assets', 'icons', iconFile))
     }
     return this.getIconUri('database')
+  }
+
+  private getConnectionStatusIcon(status: ConnectionStatusType): ThemeIcon {
+    const color = status === 'connected'
+      ? 'charts.green'
+      : status === 'error'
+        ? 'charts.red'
+        : status === 'connecting'
+          ? 'charts.yellow'
+          : 'disabledForeground'
+    const icon = status === 'connecting' ? 'sync~spin' : 'database'
+    return new ThemeIcon(icon, new ThemeColor(color))
   }
 
   private getIconForType(type: string): Uri | ThemeIcon | { dark: Uri; light: Uri } {

@@ -140,6 +140,11 @@
         "category": "%dbNexus.category%"
       },
       {
+        "command": "dbNexus.closeExpandedDatabaseTree",
+        "title": "%dbNexus.closeExpandedDatabaseTree.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
         "command": "dbNexus.renameTable",
         "title": "%dbNexus.renameTable.title%",
         "category": "%dbNexus.category%"
@@ -441,10 +446,20 @@
         {
           "command": "dbNexus.refreshTableList",
           "when": "view == dbNexus.connections && viewItem == database",
-          "group": "5_refresh@1"
+          "group": "5_refresh@2"
         },
         {
           "command": "dbNexus.refreshTableList",
+          "when": "view == dbNexus.connections && viewItem == schema",
+          "group": "5_refresh@2"
+        },
+        {
+          "command": "dbNexus.closeExpandedDatabaseTree",
+          "when": "view == dbNexus.connections && viewItem == database",
+          "group": "5_refresh@1"
+        },
+        {
+          "command": "dbNexus.closeExpandedDatabaseTree",
           "when": "view == dbNexus.connections && viewItem == schema",
           "group": "5_refresh@1"
         },

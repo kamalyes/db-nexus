@@ -6,6 +6,8 @@ import { SecretService } from '@/services/secretService'
 import { t } from '@/i18n'
 import { SUPPORTED_DRIVERS } from '@/core/constants'
 import { connectionStatusManager } from '@/services/connectionStatusManager'
+import { TableDataPanel } from '@/webviews/tableDataPanel'
+import { TableSchemaPanel } from '@/webviews/tableSchemaPanel'
 
 interface ConnectionDashboardMessage {
   type: string
@@ -348,7 +350,10 @@ export class ConnectionDashboard {
     }
 
     connectionStatusManager.setStatus(id, 'disconnected')
+    TableSchemaPanel.closeFor(profile)
+    TableDataPanel.closeFor(profile)
 
+    await commands.executeCommand('dbNexus.refreshConnections')
     await this._refresh()
     window.showInformationMessage(t('connection.disconnected', profile.name))
   }

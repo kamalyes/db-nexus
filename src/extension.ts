@@ -348,6 +348,45 @@ export function activate(context: ExtensionContext): void {
     }
   }
 
+  const getContainerScope = (node: ConnectionNode | SchemaNode | TablesGroupNode): SchemaScope => {
+    if (node instanceof ConnectionNode) {
+      return {}
+    }
+    if (node instanceof TablesGroupNode) {
+      return node.scope || {}
+    }
+    if (node.schemaObject.type === 'database') {
+      return {
+        ...node.scope,
+        database: node.schemaObject.name
+      }
+    }
+    if (node.schemaObject.type === 'schema') {
+      if (node.scope.database) {
+        return {
+          ...node.scope,
+          schema: node.schemaObject.name
+        }
+      }
+      return {
+        ...node.scope,
+        database: node.schemaObject.name
+      }
+    }
+    return node.scope || {}
+  }
+
+  const closeExpandedDatabaseTree = async (
+    node: ConnectionNode | SchemaNode | TablesGroupNode | undefined
+  ): Promise<void> => {
+    const dbContext = await resolveNodeContext(node)
+    if (!dbContext) return
+
+    const scope = node ? getContainerScope(node) : dbContext.scope
+    TableSchemaPanel.closeFor(dbContext.profile, scope)
+    connectionsTreeProvider?.refreshNode(node)
+  }
+
   context.subscriptions.push(
     outputChannel,
     window.createTreeView('dbNexus.connections', {
@@ -645,6 +684,9 @@ export function activate(context: ExtensionContext): void {
     commands.registerCommand('dbNexus.refreshTableList', () => {
       connectionsTreeProvider?.refresh()
     }),
+    commands.registerCommand('dbNexus.closeExpandedDatabaseTree', async (node: ConnectionNode | SchemaNode | TablesGroupNode | undefined) => {
+      await closeExpandedDatabaseTree(node)
+    }),
     commands.registerCommand('dbNexus.renameTable', async (node: SchemaNode | undefined) => {
       const target = await resolveTableTarget(node)
       if (!target) return
@@ -849,6 +891,10 @@ export function activate(context: ExtensionContext): void {
         await executeSql(target.profile, sql, target.scope)
         connectionsTreeProvider?.refreshTable(target.profile, target.tableName, target.scope)
         window.showInformationMessage(t('table.indexCreated', indexName))
+        await showTableSchemaForTarget(target, {
+          initialTab: 'indexes',
+          selectedIndexName: indexName
+        })
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error)
         window.showErrorMessage(t('table.createIndexFailed', message))

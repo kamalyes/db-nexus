@@ -20,6 +20,7 @@
   "dbNexus.addColumn.title": "添加字段",
   "dbNexus.refreshTable.title": "刷新表",
   "dbNexus.refreshTableList.title": "刷新表列表",
+  "dbNexus.closeExpandedDatabaseTree.title": "关闭展开项",
   "dbNexus.renameTable.title": "重命名表",
   "dbNexus.truncateTable.title": "清空表",
   "dbNexus.copyTableName.title": "复制表名",

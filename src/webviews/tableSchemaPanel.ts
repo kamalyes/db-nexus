@@ -1,8 +1,14 @@
-import { ExtensionContext, ViewColumn, window } from 'vscode'
+import { ExtensionContext, ViewColumn, WebviewPanel, window } from 'vscode'
 import { DbConnectionProfile, SchemaObject, SchemaScope, TableColumn, TableSchema } from '../core/types'
 import { t } from '../i18n'
 
 type TableSchemaTab = 'fields' | 'indexes' | 'foreignKeys' | 'checks' | 'triggers' | 'options' | 'comment' | 'sql'
+
+type TableSchemaPanelRecord = {
+  panel: WebviewPanel
+  profileId?: string
+  scope: SchemaScope
+}
 
 interface TableSchemaPanelContext {
   profile?: DbConnectionProfile
@@ -15,6 +21,8 @@ interface TableSchemaPanelContext {
 }
 
 export class TableSchemaPanel {
+  private static readonly panels = new Set<TableSchemaPanelRecord>()
+
   static show(
     context: ExtensionContext,
     title: string,
@@ -31,8 +39,29 @@ export class TableSchemaPanel {
       }
     )
 
+    const record: TableSchemaPanelRecord = {
+      panel,
+      profileId: panelContext.profile?.id,
+      scope: { ...(panelContext.scope || {}) }
+    }
+    this.panels.add(record)
+    panel.onDidDispose(() => this.panels.delete(record))
+
     panel.webview.html = this.render(schema, panelContext)
     context.subscriptions.push(panel)
+  }
+
+  static closeFor(profile: DbConnectionProfile, scope: SchemaScope = {}): number {
+    let closedCount = 0
+    for (const record of Array.from(this.panels)) {
+      if (record.profileId !== profile.id || !isScopeWithin(record.scope, scope)) {
+        continue
+      }
+
+      record.panel.dispose()
+      closedCount++
+    }
+    return closedCount
   }
 
   private static render(schema: TableSchema, panelContext: TableSchemaPanelContext): string {
@@ -574,6 +603,19 @@ export class TableSchemaPanel {
 
 function getActiveClass(activeTab: TableSchemaTab, tab: TableSchemaTab): string {
   return activeTab === tab ? 'active' : ''
+}
+
+function isScopeWithin(scope: SchemaScope, targetScope: SchemaScope): boolean {
+  if (targetScope.database && scope.database !== targetScope.database) {
+    return false
+  }
+  if (targetScope.schema && scope.schema !== targetScope.schema) {
+    return false
+  }
+  if (targetScope.parentName && scope.parentName !== targetScope.parentName) {
+    return false
+  }
+  return true
 }
 
 function renderInfoSection(title: string, rows: Array<[string, unknown]>): string {
