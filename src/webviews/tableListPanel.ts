@@ -219,21 +219,28 @@ export class TableListPanel {
   <script>
     const vscode = acquireVsCodeApi();
     const rows = Array.from(document.querySelectorAll('.table-row'));
+    const openButtons = Array.from(document.querySelectorAll('button[data-table]'));
 
     function openTable(tableName) {
       vscode.postMessage({ type: 'openTable', tableName });
     }
 
     rows.forEach(row => {
-      row.addEventListener('click', event => {
-        const target = event.target;
-        const tableName = target.dataset && target.dataset.table ? target.dataset.table : row.dataset.table;
-        openTable(tableName);
+      row.addEventListener('dblclick', event => {
+        if (event.target.closest && event.target.closest('button')) return;
+        openTable(row.dataset.table);
       });
       row.addEventListener('keydown', event => {
         if (event.key === 'Enter') {
           openTable(row.dataset.table);
         }
+      });
+    });
+
+    openButtons.forEach(button => {
+      button.addEventListener('click', event => {
+        event.stopPropagation();
+        openTable(button.dataset.table);
       });
     });
 

@@ -377,7 +377,7 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
     if (this.isTableLikeObject(node.schemaObject)) {
       item.contextValue = 'table'
       item.command = {
-        command: 'dbNexus.showTableData',
+        command: 'dbNexus.openTableOnDoubleClick',
         title: 'Open Table Data',
         arguments: [node]
       }

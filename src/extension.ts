@@ -77,10 +77,31 @@ export async function activate(context: ExtensionContext): Promise<void> {
   const queryService = new QueryService(driverRegistry)
   const queryFileService = new QueryFileService(Uri.joinPath(context.globalStorageUri, 'queries'))
   const documentQueryContexts = new Map<string, QueryExecutionContext>()
+  let pendingTableOpen: { key: string; timer: ReturnType<typeof setTimeout> } | undefined
 
   const bindSqlDocumentContext = (uri: Uri, queryContext: QueryExecutionContext): void => {
     documentQueryContexts.set(uri.toString(), queryContext)
   }
+
+  const getTableOpenKey = (node: SchemaNode): string => [
+    node.connectionProfile.id,
+    node.scope?.database || '',
+    node.scope?.schema || '',
+    node.scope?.parentName || '',
+    node.schemaObject.type,
+    node.schemaObject.name
+  ].join('\u0000')
+
+  const clearPendingTableOpen = (): void => {
+    if (pendingTableOpen) {
+      clearTimeout(pendingTableOpen.timer)
+      pendingTableOpen = undefined
+    }
+  }
+
+  const isListOpenModeDoubleClick = (): boolean => (
+    workspace.getConfiguration('workbench.list').get<string>('openMode') === 'doubleClick'
+  )
 
   context.subscriptions.push(workspace.onDidCloseTextDocument(document => {
     documentQueryContexts.delete(document.uri.toString())
@@ -941,6 +962,35 @@ export async function activate(context: ExtensionContext): Promise<void> {
     }),
     commands.registerCommand('dbNexus.openTable', async (node: SchemaNode | undefined) => {
       await commands.executeCommand('dbNexus.showTableData', node)
+    }),
+    commands.registerCommand('dbNexus.openTableOnDoubleClick', async (node: SchemaNode | undefined) => {
+      if (!node || !isTableLikeNode(node)) {
+        window.showWarningMessage(t('table.selectTable'))
+        return
+      }
+
+      if (isListOpenModeDoubleClick()) {
+        clearPendingTableOpen()
+        await commands.executeCommand('dbNexus.openTable', node)
+        return
+      }
+
+      const key = getTableOpenKey(node)
+      if (pendingTableOpen?.key === key) {
+        clearPendingTableOpen()
+        await commands.executeCommand('dbNexus.openTable', node)
+        return
+      }
+
+      clearPendingTableOpen()
+      pendingTableOpen = {
+        key,
+        timer: setTimeout(() => {
+          if (pendingTableOpen?.key === key) {
+            pendingTableOpen = undefined
+          }
+        }, 450)
+      }
     }),
     commands.registerCommand('dbNexus.showTableSchema', async (node: SchemaNode | undefined) => {
       if (!node || !isTableLikeNode(node)) {
