@@ -1,6 +1,7 @@
 src/**
 node_modules/**
-*.map
+**/*.map
+scripts/**
 tsconfig*.json
 webpack.config.js
 package-lock.json

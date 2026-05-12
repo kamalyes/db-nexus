@@ -1,6 +1,6 @@
-import initSqlJs, { Database, SqlJsStatic } from 'sql.js'
 import * as fs from 'fs'
-import * as path from 'path'
+import type { Database, SqlJsStatic } from 'sql.js'
+import { getSqlJsFilePath, loadSqlJs } from '@/core/sqlJs'
 import {
   ConnectionTestResult,
   DatabaseCatalog,
@@ -27,9 +27,14 @@ export class SQLiteDriver implements DatabaseDriver {
   private SQL: SqlJsStatic | null = null
   private connections = new Map<string, Database>()
 
+  constructor(private readonly extensionPath = '') {}
+
   private async initSqlJs(): Promise<SqlJsStatic> {
     if (!this.SQL) {
-      this.SQL = await initSqlJs()
+      const initSqlJs = loadSqlJs(this.extensionPath)
+      this.SQL = await initSqlJs({
+        locateFile: (file: string) => getSqlJsFilePath(this.extensionPath, file)
+      })
     }
     return this.SQL
   }

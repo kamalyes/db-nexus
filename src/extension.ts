@@ -1,7 +1,8 @@
-import { ExtensionContext, ProgressLocation, Uri, commands, env, window, workspace } from 'vscode'
+import { ExtensionContext, ProgressLocation, TreeItemCollapsibleState, Uri, commands, env, window, workspace } from 'vscode'
+import { parseConnectionUrl } from '@/core/connectionUrl'
 import { ConnectionStore } from '@/core/connectionStore'
 import { SUPPORTED_DRIVERS } from '@/core/constants'
-import { DatabaseDriverId, DbConnectionProfile, SchemaObject, SchemaScope, TableSchema } from '@/core/types'
+import { ConnectionTestResult, DatabaseDriverId, DbConnectionProfile, SchemaObject, SchemaScope, TableSchema } from '@/core/types'
 import { DriverRegistry } from '@/drivers/registry'
 import { getCurrentLanguage, initI18n, reloadI18n, t } from '@/i18n'
 import { ConnectionNode, ConnectionsTreeProvider, FieldNode, IndexNode, SchemaNode, TableDetailGroupNode, TablesGroupNode } from '@/providers/connectionsTree'
@@ -24,6 +25,7 @@ import { DataMigrationService, MigrationOptions } from '@/services/dataMigration
 import { ConnectionDashboard } from '@/webviews/connectionDashboard'
 
 let connectionsTreeProvider: ConnectionsTreeProvider | undefined
+let connectionsTreeView: ReturnType<typeof window.createTreeView> | undefined
 
 type TableTarget = {
   profile: DbConnectionProfile
@@ -44,18 +46,22 @@ type FieldTarget = {
 
 type TableSchemaTab = 'fields' | 'indexes' | 'foreignKeys' | 'checks' | 'triggers' | 'options' | 'comment' | 'sql'
 
-export function activate(context: ExtensionContext): void {
+export async function activate(context: ExtensionContext): Promise<void> {
   initI18n(context.extensionPath)
   SecretService.init(context)
   QueryHistoryService.init(context)
 
   const outputChannel = window.createOutputChannel('DB Nexus')
-  const connectionStore = new ConnectionStore()
-  const driverRegistry = new DriverRegistry()
+  const connectionStore = await ConnectionStore.create(context)
+  const driverRegistry = new DriverRegistry(context.extensionPath)
   const connectionService = new ConnectionService(connectionStore, driverRegistry)
   const queryService = new QueryService(driverRegistry)
 
   connectionsTreeProvider = new ConnectionsTreeProvider(connectionService, context.extensionPath)
+  connectionsTreeView = window.createTreeView('dbNexus.connections', {
+    treeDataProvider: connectionsTreeProvider,
+    showCollapseAll: true
+  })
 
   const resolveNodeContext = async (
     node: ConnectionNode | SchemaNode | TableDetailGroupNode | TablesGroupNode | undefined
@@ -389,14 +395,210 @@ export function activate(context: ExtensionContext): void {
     await commands.executeCommand('workbench.actions.treeView.dbNexus.connections.collapseAll').then(undefined, () => undefined)
   }
 
+  const resolveConnectionProfile = async (
+    target?: ConnectionNode | DbConnectionProfile | string
+  ): Promise<DbConnectionProfile | undefined> => {
+    if (target instanceof ConnectionNode) {
+      return target.profile
+    }
+    if (typeof target === 'string') {
+      return connectionStore.getById(target)
+    }
+    if (target && 'id' in target && 'driverId' in target) {
+      return target
+    }
+    return pickConnection(connectionService.getConnections())
+  }
+
+  const runTemporaryConnectionTest = async (profile: DbConnectionProfile): Promise<ConnectionTestResult> => {
+    const driver = driverRegistry.getDriver(profile.driverId)
+    const secretService = SecretService.getInstance()
+    const tempProfile: DbConnectionProfile = {
+      ...profile,
+      id: `test_${profile.id}_${Date.now()}`
+    }
+    const password = await secretService.getPassword(profile.id)
+
+    if (password) {
+      await secretService.storePassword(tempProfile.id, password)
+    }
+
+    try {
+      return await connectionService.testConnection(tempProfile)
+    } finally {
+      if (driver.dispose) {
+        await driver.dispose(tempProfile.id).then(undefined, () => undefined)
+      }
+      if (password) {
+        await secretService.deletePassword(tempProfile.id)
+      }
+    }
+  }
+
+  const restoreConnectionStatus = (
+    profileId: string,
+    previousStatus: ReturnType<typeof connectionStatusManager.getStatus>
+  ): void => {
+    if (previousStatus) {
+      connectionStatusManager.setStatus(
+        profileId,
+        previousStatus.status,
+        previousStatus.latency,
+        previousStatus.error
+      )
+    } else {
+      connectionStatusManager.clearStatus(profileId)
+    }
+  }
+
+  const testConnectionOnly = async (
+    target?: ConnectionNode | DbConnectionProfile | string
+  ): Promise<void> => {
+    const profile = await resolveConnectionProfile(target)
+    if (!profile) return
+
+    const previousStatus = connectionStatusManager.getStatus(profile.id)
+    await window.withProgress(
+      { location: ProgressLocation.Notification, title: t('connection.testing') },
+      async () => {
+        connectionStatusManager.setStatus(profile.id, 'connecting')
+        connectionsTreeProvider?.refresh()
+
+        try {
+          const result = await runTemporaryConnectionTest(profile)
+          if (result.ok) {
+            window.showInformationMessage(t('connection.testSuccess', result.latencyMs || 0))
+          } else {
+            window.showErrorMessage(t('connection.testFailed', result.message))
+          }
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error)
+          window.showErrorMessage(t('connection.testFailed', message))
+        } finally {
+          restoreConnectionStatus(profile.id, previousStatus)
+          connectionsTreeProvider?.refresh()
+        }
+      }
+    )
+  }
+
+  const addConnectionFromUrl = async (connectionUrl?: string): Promise<void> => {
+    const rawUrl = connectionUrl || await window.showInputBox({
+      prompt: t('connection.urlPrompt'),
+      placeHolder: 'postgresql://user:password@localhost:5432/app?ssl=true',
+      ignoreFocusOut: true
+    })
+    if (!rawUrl) return
+
+    try {
+      const parsed = parseConnectionUrl(rawUrl)
+      const savedProfile = await connectionStore.add(parsed.profile)
+      if (parsed.password) {
+        await SecretService.getInstance().storePassword(savedProfile.id, parsed.password)
+      }
+      connectionsTreeProvider?.refresh()
+      ConnectionDashboard.refreshCurrent()
+      window.showInformationMessage(t('connection.added', savedProfile.name))
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      window.showErrorMessage(t('connection.urlInvalid', message))
+    }
+  }
+
+  const connectConnection = async (
+    target?: ConnectionNode | DbConnectionProfile | string
+  ): Promise<boolean> => {
+    const profile = await resolveConnectionProfile(target)
+    if (!profile) return false
+
+    return window.withProgress(
+      { location: ProgressLocation.Notification, title: t('connection.connecting', profile.name) },
+      async () => {
+        const driver = driverRegistry.getDriver(profile.driverId)
+        if (driver.dispose) {
+          await driver.dispose(profile.id)
+        }
+
+        connectionStatusManager.setStatus(profile.id, 'connecting')
+        connectionsTreeProvider?.refresh()
+
+        const result = await connectionService.testConnection(profile)
+        if (result.ok) {
+          connectionStatusManager.setStatus(profile.id, 'connected', result.latencyMs)
+          connectionsTreeProvider?.refresh()
+          window.showInformationMessage(t('connection.connected', profile.name))
+          return true
+        }
+
+        connectionStatusManager.setStatus(profile.id, 'error', undefined, result.message)
+        if (driver.dispose) {
+          await driver.dispose(profile.id)
+        }
+        connectionsTreeProvider?.refresh()
+        window.showErrorMessage(t('connection.connectFailed', result.message))
+        return false
+      }
+    )
+  }
+
+  const disconnectConnection = async (
+    target?: ConnectionNode | DbConnectionProfile | string
+  ): Promise<void> => {
+    const profile = await resolveConnectionProfile(target)
+    if (!profile) return
+
+    const driver = driverRegistry.getDriver(profile.driverId)
+    if (driver.dispose) {
+      await driver.dispose(profile.id)
+    }
+
+    connectionStatusManager.setStatus(profile.id, 'disconnected')
+    TableSchemaPanel.closeFor(profile)
+    TableDataPanel.closeFor(profile)
+    connectionsTreeProvider?.collapseAll()
+    await commands.executeCommand('workbench.actions.treeView.dbNexus.connections.collapseAll').then(undefined, () => undefined)
+    window.showInformationMessage(t('connection.disconnected', profile.name))
+  }
+
+  const openDatabase = async (
+    target?: ConnectionNode | DbConnectionProfile | string
+  ): Promise<void> => {
+    const profile = await resolveConnectionProfile(target)
+    if (!profile) return
+
+    if (!connectionStatusManager.isConnected(profile.id)) {
+      const connected = await connectConnection(profile)
+      if (!connected) return
+    }
+
+    connectionsTreeProvider?.refresh()
+    try {
+      await connectionsTreeView?.reveal(
+        new ConnectionNode(profile, TreeItemCollapsibleState.Expanded),
+        { focus: true, select: true, expand: true }
+      )
+    } catch {
+      await commands.executeCommand('dbNexus.refreshConnections')
+    }
+  }
+
   context.subscriptions.push(
     outputChannel,
-    window.createTreeView('dbNexus.connections', {
-      treeDataProvider: connectionsTreeProvider,
-      showCollapseAll: true
-    }),
+    connectionsTreeView,
     commands.registerCommand('dbNexus.refreshConnections', () => {
       connectionsTreeProvider?.refresh()
+    }),
+    commands.registerCommand('dbNexus.connectConnection', async (target?: ConnectionNode | DbConnectionProfile | string) => {
+      await connectConnection(target)
+    }),
+    commands.registerCommand('dbNexus.disconnectConnection', async (target?: ConnectionNode | DbConnectionProfile | string) => {
+      await disconnectConnection(target)
+    }),
+    commands.registerCommand('dbNexus.openDatabase', async (target?: ConnectionNode | DbConnectionProfile | string) => {
+      await openDatabase(target)
+    }),
+    commands.registerCommand('dbNexus.addConnectionFromUrl', async (connectionUrl?: string) => {
+      await addConnectionFromUrl(connectionUrl)
     }),
     commands.registerCommand('dbNexus.openDashboard', () => {
       ConnectionDashboard.show(context, connectionStore, driverRegistry)
@@ -407,39 +609,8 @@ export function activate(context: ExtensionContext): void {
         ConnectionDashboard.showAddForm()
       }, 100)
     }),
-    commands.registerCommand('dbNexus.testConnection', async (node: ConnectionNode | undefined) => {
-      const profile = node ? node.profile : await pickConnection(connectionService.getConnections())
-      if (!profile) return
-
-      await window.withProgress(
-        { location: ProgressLocation.Notification, title: t('connection.testing') },
-        async () => {
-          const driver = driverRegistry.getDriver(profile.driverId)
-          if (driver.dispose) {
-            await driver.dispose(profile.id)
-          }
-
-          connectionStatusManager.setStatus(profile.id, 'connecting')
-          const result = await connectionService.testConnection(profile)
-          connectionStatusManager.setStatus(
-            profile.id,
-            result.ok ? 'connected' : 'error',
-            result.latencyMs,
-            result.ok ? undefined : result.message
-          )
-
-          if (!result.ok && driver.dispose) {
-            await driver.dispose(profile.id)
-          }
-
-          connectionsTreeProvider?.refresh()
-          if (result.ok) {
-            window.showInformationMessage(t('connection.testSuccess', result.latencyMs || 0))
-          } else {
-            window.showErrorMessage(t('connection.testFailed', result.message))
-          }
-        }
-      )
+    commands.registerCommand('dbNexus.testConnection', async (target: ConnectionNode | DbConnectionProfile | string | undefined) => {
+      await testConnectionOnly(target)
     }),
     commands.registerCommand('dbNexus.deleteConnection', async (node: ConnectionNode | undefined) => {
       const profile = node ? node.profile : await pickConnection(connectionService.getConnections())
@@ -458,8 +629,11 @@ export function activate(context: ExtensionContext): void {
       }
       await connectionStore.remove(profile.id)
       await SecretService.getInstance().deletePassword(profile.id)
+      TableSchemaPanel.closeFor(profile)
+      TableDataPanel.closeFor(profile)
       connectionStatusManager.clearStatus(profile.id)
-      connectionsTreeProvider?.refresh()
+      connectionsTreeProvider?.collapseAll()
+      await commands.executeCommand('workbench.actions.treeView.dbNexus.connections.collapseAll').then(undefined, () => undefined)
       window.showInformationMessage(t('connection.deleted', profile.name))
     }),
     commands.registerCommand('dbNexus.editConnection', async (node: ConnectionNode | undefined) => {
@@ -1455,10 +1629,6 @@ export function activate(context: ExtensionContext): void {
       )
     }),
     workspace.onDidChangeConfiguration(event => {
-      if (event.affectsConfiguration('dbNexus.connections')) {
-        connectionsTreeProvider?.refresh()
-      }
-
       if (event.affectsConfiguration('dbNexus.displayLanguage')) {
         reloadI18n()
         connectionsTreeProvider?.refresh()

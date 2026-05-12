@@ -26,6 +26,7 @@ export class ConnectionDashboard {
   private static _driverRegistry: DriverRegistry | undefined
   private readonly _panel: WebviewPanel
   private _disposables: any[] = []
+  private _viewMode: 'dashboard' | 'form' = 'dashboard'
 
   static show(
     context: ExtensionContext,
@@ -73,6 +74,12 @@ export class ConnectionDashboard {
     }
   }
 
+  static refreshCurrent(): void {
+    if (ConnectionDashboard.currentPanel) {
+      void ConnectionDashboard.currentPanel._refresh()
+    }
+  }
+
   private constructor(
     panel: WebviewPanel,
     connectionStore: ConnectionStore,
@@ -85,6 +92,12 @@ export class ConnectionDashboard {
     this._panel.webview.onDidReceiveMessage(async (message) => {
       await this._handleMessage(message)
     })
+
+    connectionStatusManager.onDidChangeStatus(() => {
+      if (this._viewMode === 'dashboard') {
+        void this._refresh()
+      }
+    }, null, this._disposables)
 
     this._panel.onDidDispose(() => this.dispose(), null, this._disposables)
   }
@@ -100,6 +113,11 @@ export class ConnectionDashboard {
 
       case 'addConnection':
         await this._showAddForm()
+        break
+
+      case 'addConnectionFromUrl':
+        await commands.executeCommand('dbNexus.addConnectionFromUrl')
+        await this._refresh()
         break
 
       case 'editConnection':
@@ -174,10 +192,12 @@ export class ConnectionDashboard {
     const connections = store.getAll()
     const statuses = connectionStatusManager.getAllStatuses()
 
+    this._viewMode = 'dashboard'
     this._panel.webview.html = this._getDashboardHtml(connections, statuses)
   }
 
   private async _showAddForm(): Promise<void> {
+    this._viewMode = 'form'
     this._panel.webview.html = this._getConnectionWizardHtml()
   }
 
@@ -185,6 +205,7 @@ export class ConnectionDashboard {
     const store = ConnectionDashboard._connectionStore!
     const profile = store.getAll().find(c => c.id === id)
     if (profile) {
+      this._viewMode = 'form'
       this._panel.webview.html = this._getConnectionWizardHtml(profile)
     }
   }
@@ -223,61 +244,35 @@ export class ConnectionDashboard {
       }
       await store.remove(id)
       await SecretService.getInstance().deletePassword(id)
+      TableSchemaPanel.closeFor(profile)
+      TableDataPanel.closeFor(profile)
       connectionStatusManager.clearStatus(id)
       await commands.executeCommand('dbNexus.refreshConnections')
+      await commands.executeCommand('workbench.actions.treeView.dbNexus.connections.collapseAll').then(undefined, () => undefined)
       await this._refresh()
       window.showInformationMessage(t('connection.deleted', profile.name))
     }
   }
 
   private async _testConnection(id: string): Promise<void> {
-    const store = ConnectionDashboard._connectionStore!
-    const registry = ConnectionDashboard._driverRegistry!
-    const profile = store.getAll().find(c => c.id === id)
-    if (!profile) return
-
-    const driver = registry.getDriver(profile.driverId)
-    if (driver.dispose) {
-      await driver.dispose(id)
-    }
-    
-    connectionStatusManager.setStatus(id, 'connecting')
+    await commands.executeCommand('dbNexus.testConnection', id)
     await this._refresh()
-
-    const result = await driver.testConnection(profile)
-    
-    connectionStatusManager.setStatus(
-      id,
-      result.ok ? 'connected' : 'error',
-      result.latencyMs,
-      result.ok ? undefined : result.message
-    )
-
-    if (!result.ok && driver.dispose) {
-      await driver.dispose(id)
-    }
-
-    await commands.executeCommand('dbNexus.refreshConnections')
-    await this._refresh()
-
-    if (result.ok) {
-      window.showInformationMessage(t('connection.testSuccess', String(result.latencyMs)))
-    } else {
-      window.showErrorMessage(t('connection.testFailed', result.message))
-    }
   }
 
   private async _testDraftConnection(profileData: Partial<DbConnectionProfile>, password?: string, requestId?: number): Promise<void> {
     const registry = ConnectionDashboard._driverRegistry!
     const driverId = profileData.driverId || 'mysql'
-    const shouldUseTempProfile = !!password || !profileData.id
-    const profileId = shouldUseTempProfile ? this._generateId() : profileData.id!
-    const profile = this._normalizeProfile(profileData, profileId)
+    const sourceProfileId = profileData.id
+    const profile = this._normalizeProfile(profileData, this._generateId())
     const driver = registry.getDriver(driverId)
     const secretService = SecretService.getInstance()
+    const existingPassword = !password && sourceProfileId
+      ? await secretService.getPassword(sourceProfileId)
+      : undefined
+    const testPassword = password || existingPassword
 
-    if (password) {
-      await secretService.storePassword(profile.id, password)
+    if (testPassword) {
+      await secretService.storePassword(profile.id, testPassword)
     }
 
     try {
@@ -297,66 +292,23 @@ export class ConnectionDashboard {
       await this._panel.webview.postMessage({ type: 'draftConnectionTestResult', ok: false, message, requestId })
       window.showErrorMessage(message)
     } finally {
-      if (password) {
+      if (testPassword) {
         await secretService.deletePassword(profile.id)
       }
-      if (shouldUseTempProfile && driver.dispose) {
-        await driver.dispose(profile.id)
+      if (driver.dispose) {
+        await driver.dispose(profile.id).then(undefined, () => undefined)
       }
     }
   }
 
   private async _connect(id: string): Promise<void> {
-    const store = ConnectionDashboard._connectionStore!
-    const registry = ConnectionDashboard._driverRegistry!
-    const profile = store.getAll().find(c => c.id === id)
-    if (!profile) return
-
-    const driver = registry.getDriver(profile.driverId)
-    if (driver.dispose) {
-      await driver.dispose(id)
-    }
-
-    connectionStatusManager.setStatus(id, 'connecting')
+    await commands.executeCommand('dbNexus.connectConnection', id)
     await this._refresh()
-    
-    const result = await driver.testConnection(profile)
-
-    if (result.ok) {
-      connectionStatusManager.setStatus(id, 'connected', result.latencyMs)
-      await commands.executeCommand('dbNexus.refreshConnections')
-      await this._refresh()
-      window.showInformationMessage(t('connection.connected', profile.name))
-    } else {
-      connectionStatusManager.setStatus(id, 'error', undefined, result.message)
-      if (driver.dispose) {
-        await driver.dispose(id)
-      }
-      await commands.executeCommand('dbNexus.refreshConnections')
-      await this._refresh()
-      window.showErrorMessage(t('connection.connectFailed', result.message))
-    }
   }
 
   private async _disconnect(id: string): Promise<void> {
-    const store = ConnectionDashboard._connectionStore!
-    const registry = ConnectionDashboard._driverRegistry!
-    const profile = store.getAll().find(c => c.id === id)
-    if (!profile) return
-
-    const driver = registry.getDriver(profile.driverId)
-    if (driver.dispose) {
-      await driver.dispose(id)
-    }
-
-    connectionStatusManager.setStatus(id, 'disconnected')
-    TableSchemaPanel.closeFor(profile)
-    TableDataPanel.closeFor(profile)
-
-    await commands.executeCommand('dbNexus.refreshConnections')
-    await commands.executeCommand('workbench.actions.treeView.dbNexus.connections.collapseAll').then(undefined, () => undefined)
+    await commands.executeCommand('dbNexus.disconnectConnection', id)
     await this._refresh()
-    window.showInformationMessage(t('connection.disconnected', profile.name))
   }
 
   private async _saveConnection(profileData: Partial<DbConnectionProfile>, password?: string, savePassword = true): Promise<void> {
@@ -461,6 +413,7 @@ export class ConnectionDashboard {
       connect: icon('<path fill="currentColor" d="M5.2 6.7 2.8 4.3 4.3 2.8l2.4 2.4 1.5-1.5 1.1 1.1-4.5 4.5-1.1-1.1 1.5-1.5Zm5.6 2.6 2.4 2.4-1.5 1.5-2.4-2.4-1.5 1.5-1.1-1.1 4.5-4.5 1.1 1.1-1.5 1.5Z"/>'),
       query: icon('<path fill="currentColor" d="M2 3.5A1.5 1.5 0 0 1 3.5 2h9A1.5 1.5 0 0 1 14 3.5v9a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12.5v-9Zm1.5 0v9h9v-9h-9Zm1.4 2.1 1-.9 2.1 2.1-2.1 2.1-1-.9 1.2-1.2-1.2-1.2Zm3.8 4.5h3.1v1.3H8.7v-1.3Z"/>'),
       test: icon('<path fill="currentColor" d="M6.8 1.8h2.4v1.4l3.9 6.6A2.8 2.8 0 0 1 10.7 14H5.3a2.8 2.8 0 0 1-2.4-4.2l3.9-6.6V1.8Zm1.4 2.1H7.8L4.1 10.5A1.4 1.4 0 0 0 5.3 12.6h5.4a1.4 1.4 0 0 0 1.2-2.1L8.2 3.9ZM5.4 9.7h5.2l.8 1.4H4.6l.8-1.4Z"/>'),
+      link: icon('<path fill="currentColor" d="M6.2 10.9 5.1 12a2.2 2.2 0 0 1-3.1-3.1l2.2-2.2a2.2 2.2 0 0 1 3.1 0l.6.6-1.1 1.1-.6-.6a.7.7 0 0 0-1 0L3 10a.7.7 0 0 0 1 1l1.1-1.1 1.1 1Zm-.4-2 3.1-3.1 1.1 1.1L6.9 10 5.8 8.9Zm2.3-.2-.6-.6 1.1-1.1.6.6a.7.7 0 0 0 1 0L12.4 5.4a.7.7 0 0 0-1-1l-1.1 1.1-1.1-1.1 1.1-1.1a2.2 2.2 0 0 1 3.1 3.1l-2.2 2.2a2.2 2.2 0 0 1-3.1.1Z"/>'),
       edit: icon('<path fill="currentColor" d="m11.7 1.7 2.6 2.6-7.9 7.9-3.3.7.7-3.3 7.9-7.9ZM4.9 10.3l-.2.9.9-.2 6.7-6.7-.7-.7-6.7 6.7Z"/>'),
       delete: icon('<path fill="currentColor" d="M6.5 1h3l.7 1.5H14V4H2V2.5h3.8L6.5 1ZM3.2 5h9.6l-.7 9H3.9l-.7-9Zm2 1.4.4 6.2H7L6.6 6.4H5.2Zm3.8 0-.4 6.2H10l.4-6.2H9Z"/>'),
       server: icon('<path fill="currentColor" d="M3 2h10a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1Zm0 7h10a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1Zm1.2-5.2v1.4h1.4V3.8H4.2Zm0 7v1.4h1.4v-1.4H4.2Z"/>')
@@ -887,6 +840,7 @@ export class ConnectionDashboard {
       </div>
       <div class="hero-actions">
         <button class="btn" data-action="refresh">${icons.refresh}<span>${t('dashboard.refresh')}</span></button>
+        <button class="btn" data-action="addConnectionFromUrl">${icons.link}<span>${t('dashboard.addFromUrl')}</span></button>
         <button class="btn primary" data-action="addConnection">${icons.plus}<span>${t('dashboard.addConnection')}</span></button>
       </div>
     </section>
@@ -906,6 +860,7 @@ export class ConnectionDashboard {
     const actionMap = {
       refresh: function() { vscode.postMessage({ type: 'refresh' }); },
       addConnection: function() { vscode.postMessage({ type: 'addConnection' }); },
+      addConnectionFromUrl: function() { vscode.postMessage({ type: 'addConnectionFromUrl' }); },
       editConnection: function(id) { vscode.postMessage({ type: 'editConnection', id: id }); },
       deleteConnection: function(id) { vscode.postMessage({ type: 'deleteConnection', id: id }); },
       testConnection: function(id) { vscode.postMessage({ type: 'testConnection', id: id }); },
@@ -1693,7 +1648,7 @@ export class ConnectionDashboard {
     <footer class="footer">
       <div class="footer-group">
         <button type="button" class="btn" id="testButton">测试连接</button>
-        <button type="button" class="btn" id="uriButton" disabled>URI...</button>
+        <button type="button" class="btn" id="uriButton">URI...</button>
       </div>
       <div class="footer-group">
         <button type="button" class="btn" id="backButton">上一步</button>
@@ -1875,7 +1830,7 @@ export class ConnectionDashboard {
       document.getElementById('nextButton').classList.toggle('hidden', isEdit || !selectActive);
       document.getElementById('saveButton').classList.toggle('hidden', selectActive);
       document.getElementById('testButton').classList.toggle('hidden', selectActive);
-      document.getElementById('uriButton').classList.toggle('hidden', selectActive);
+      document.getElementById('uriButton').classList.toggle('hidden', false);
       if (!selectActive) {
         updateDriverFields();
         updateDriverState();
@@ -1981,6 +1936,9 @@ export class ConnectionDashboard {
       document.getElementById('testButton').disabled = true;
       setFormStatus('正在测试连接...', 'testing');
       vscode.postMessage({ type: 'testDraftConnection', profile: profile, password: optionalText('password'), requestId: requestId });
+    });
+    document.getElementById('uriButton').addEventListener('click', function() {
+      vscode.postMessage({ type: 'addConnectionFromUrl' });
     });
     document.getElementById('connectionForm').addEventListener('submit', function(event) {
       event.preventDefault();

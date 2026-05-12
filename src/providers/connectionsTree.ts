@@ -250,13 +250,44 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
     item.description = this.getConnectionStatusDescription(node.profile, status)
     item.tooltip = this.getConnectionTooltip(node.profile, status)
     item.iconPath = this.getConnectionStatusIcon(statusType)
-    item.contextValue = 'connection'
+    item.contextValue = this.getConnectionContextValue(statusType)
+    item.command = this.getConnectionCommand(node, statusType)
     
     if (status?.status === 'connected') {
       item.resourceUri = Uri.parse(`dbnexus://connected/${node.profile.id}`)
     }
     
     return item
+  }
+
+  private getConnectionCommand(node: ConnectionNode, status: ConnectionStatusType): TreeItem['command'] {
+    if (status === 'connected') {
+      return {
+        command: 'dbNexus.openDatabase',
+        title: t('connection.openDatabase'),
+        arguments: [node]
+      }
+    }
+
+    if (status === 'disconnected' || status === 'error') {
+      return {
+        command: 'dbNexus.connectConnection',
+        title: t('dashboard.actions.connect'),
+        arguments: [node]
+      }
+    }
+
+    return undefined
+  }
+
+  private getConnectionContextValue(status: ConnectionStatusType): string {
+    const suffix: Record<ConnectionStatusType, string> = {
+      connected: 'Connected',
+      disconnected: 'Disconnected',
+      error: 'Error',
+      connecting: 'Connecting'
+    }
+    return `connection${suffix[status]}`
   }
 
   private getConnectionStatusDescription(profile: DbConnectionProfile, status?: { status: ConnectionStatusType; latency?: number }): string {

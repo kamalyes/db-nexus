@@ -13,12 +13,12 @@ export class DriverRegistry {
   private readonly drivers = new Map<DatabaseDriverId, DatabaseDriver>()
   private readonly definitions = new Map<DatabaseDriverId, DriverDefinition>()
 
-  constructor() {
+  constructor(private readonly extensionPath = '') {
     for (const definition of SUPPORTED_DRIVERS) {
       this.definitions.set(definition.id, definition)
     }
 
-    this.register(new SQLiteDriver())
+    this.register(new SQLiteDriver(this.extensionPath))
     this.register(new PostgreSQLDriver())
     this.register(new MySQLDriver())
     this.register(new MariaDBDriver())

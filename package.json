@@ -29,7 +29,14 @@
   "activationEvents": [
     "onStartupFinished",
     "onView:dbNexus.connections",
+    "onCommand:dbNexus.openDashboard",
     "onCommand:dbNexus.addConnection",
+    "onCommand:dbNexus.addConnectionFromUrl",
+    "onCommand:dbNexus.refreshConnections",
+    "onCommand:dbNexus.connectConnection",
+    "onCommand:dbNexus.disconnectConnection",
+    "onCommand:dbNexus.openDatabase",
+    "onCommand:dbNexus.testConnection",
     "onCommand:dbNexus.runQuery"
   ],
   "main": "./dist/extension.js",
@@ -51,6 +58,12 @@
         }
       },
       {
+        "command": "dbNexus.addConnectionFromUrl",
+        "title": "%dbNexus.addConnectionFromUrl.title%",
+        "category": "%dbNexus.category%",
+        "icon": "$(link)"
+      },
+      {
         "command": "dbNexus.refreshConnections",
         "title": "%dbNexus.refreshConnections.title%",
         "category": "%dbNexus.category%",
@@ -62,6 +75,21 @@
       {
         "command": "dbNexus.testConnection",
         "title": "%dbNexus.testConnection.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.connectConnection",
+        "title": "%dbNexus.connectConnection.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.disconnectConnection",
+        "title": "%dbNexus.disconnectConnection.title%",
+        "category": "%dbNexus.category%"
+      },
+      {
+        "command": "dbNexus.openDatabase",
+        "title": "%dbNexus.openDatabase.title%",
         "category": "%dbNexus.category%"
       },
       {
@@ -372,30 +400,50 @@
           "group": "navigation@2"
         },
         {
-          "command": "dbNexus.refreshConnections",
+          "command": "dbNexus.addConnectionFromUrl",
           "when": "view == dbNexus.connections",
           "group": "navigation@3"
+        },
+        {
+          "command": "dbNexus.refreshConnections",
+          "when": "view == dbNexus.connections",
+          "group": "navigation@4"
         }
       ],
       "view/item/context": [
         {
-          "command": "dbNexus.testConnection",
-          "when": "view == dbNexus.connections && viewItem == connection",
+          "command": "dbNexus.openDatabase",
+          "when": "view == dbNexus.connections && viewItem == connectionConnected",
+          "group": "1_connection@0"
+        },
+        {
+          "command": "dbNexus.connectConnection",
+          "when": "view == dbNexus.connections && (viewItem == connectionDisconnected || viewItem == connectionError)",
+          "group": "1_connection@0"
+        },
+        {
+          "command": "dbNexus.disconnectConnection",
+          "when": "view == dbNexus.connections && viewItem == connectionConnected",
           "group": "1_connection@1"
         },
         {
-          "command": "dbNexus.editConnection",
-          "when": "view == dbNexus.connections && viewItem == connection",
+          "command": "dbNexus.testConnection",
+          "when": "view == dbNexus.connections && viewItem =~ /^connection/",
           "group": "1_connection@2"
         },
         {
-          "command": "dbNexus.deleteConnection",
-          "when": "view == dbNexus.connections && viewItem == connection",
+          "command": "dbNexus.editConnection",
+          "when": "view == dbNexus.connections && viewItem =~ /^connection/",
           "group": "1_connection@3"
         },
         {
+          "command": "dbNexus.deleteConnection",
+          "when": "view == dbNexus.connections && viewItem =~ /^connection/",
+          "group": "1_connection@4"
+        },
+        {
           "command": "dbNexus.closeExpandedDatabaseTree",
-          "when": "view == dbNexus.connections && viewItem == connection",
+          "when": "view == dbNexus.connections && viewItem =~ /^connection/",
           "group": "5_refresh@1"
         },
         {
@@ -747,14 +795,6 @@
     "configuration": {
       "title": "DB Nexus",
       "properties": {
-        "dbNexus.connections": {
-          "type": "array",
-          "default": [],
-          "description": "%dbNexus.connections.description%",
-          "items": {
-            "type": "object"
-          }
-        },
         "dbNexus.defaultQueryLimit": {
           "type": "number",
           "default": 500,
@@ -786,7 +826,7 @@
     }
   },
   "scripts": {
-    "build": "webpack --mode production",
+    "build": "webpack --mode production && node scripts/copy-sql-wasm.js",
     "dev": "webpack --mode development --watch",
     "lint": "tsc --noEmit",
     "package": "npm run build && vsce package"
