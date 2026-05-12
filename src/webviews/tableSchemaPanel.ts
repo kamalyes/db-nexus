@@ -1,4 +1,4 @@
-import { ExtensionContext, ViewColumn, WebviewPanel, window } from 'vscode'
+import { commands, ExtensionContext, ViewColumn, WebviewPanel, window } from 'vscode'
 import { DbConnectionProfile, SchemaObject, SchemaScope, TableColumn, TableSchema } from '../core/types'
 import { t } from '../i18n'
 
@@ -18,6 +18,8 @@ interface TableSchemaPanelContext {
   description?: string
   initialTab?: TableSchemaTab
   selectedIndexName?: string
+  schemaLoadMs?: number
+  loadedAt?: string
 }
 
 export class TableSchemaPanel {
@@ -44,10 +46,30 @@ export class TableSchemaPanel {
       profileId: panelContext.profile?.id,
       scope: { ...(panelContext.scope || {}) }
     }
+    const scope = { ...(panelContext.scope || {}) }
+    const objectType = panelContext.objectType || 'table'
     this.panels.add(record)
-    panel.onDidDispose(() => this.panels.delete(record))
 
     panel.webview.html = this.render(schema, panelContext)
+    const messageSubscription = panel.webview.onDidReceiveMessage(async message => {
+      if (message?.type !== 'generateMockData' || !panelContext.profile) {
+        return
+      }
+
+      await commands.executeCommand('dbNexus.generateData', {
+        profile: panelContext.profile,
+        scope,
+        tableName: schema.name,
+        objectType,
+        rowCount: panelContext.rowCount,
+        description: panelContext.description,
+        schema
+      })
+    })
+    panel.onDidDispose(() => {
+      messageSubscription.dispose()
+      this.panels.delete(record)
+    })
     context.subscriptions.push(panel)
   }
 
@@ -76,6 +98,14 @@ export class TableSchemaPanel {
     const autoIncrementColumns = schema.columns.filter(column => column.isAutoIncrement).map(column => column.name)
     const nullableColumns = schema.columns.filter(column => column.nullable).length
     const notNullColumns = schema.columns.length - nullableColumns
+    const loadedAt = panelContext.loadedAt || new Date().toISOString()
+    const tableRows = panelContext.rowCount ?? metadata.tableRows
+    const dataLength = toNumber(metadata.dataLength)
+    const indexLength = toNumber(metadata.indexLength)
+    const totalLength = toNumber(metadata.totalLength)
+    const averageRowLength = toNumber(tableRows) && dataLength
+      ? dataLength / Number(tableRows)
+      : undefined
     const columnDetails = schema.columns.map(column => ({
       name: column.name,
       type: column.type,
@@ -150,6 +180,16 @@ export class TableSchemaPanel {
         [t('table.userVersion'), metadata.userVersion],
         [t('table.journalMode'), metadata.journalMode]
       ]),
+      renderInfoSection(t('table.performanceInfo'), [
+        [t('table.schemaLoadTime'), formatDuration(panelContext.schemaLoadMs)],
+        [t('table.loadedAt'), formatDateTime(loadedAt)],
+        [t('table.estimatedRows'), tableRows],
+        [t('table.averageRowLength'), formatBytes(averageRowLength)],
+        [t('table.dataLength'), formatBytes(dataLength)],
+        [t('table.indexLength'), formatBytes(indexLength)],
+        [t('table.totalLength'), formatBytes(totalLength)],
+        [t('table.indexSizeRatio'), formatPercent(indexLength && totalLength ? indexLength / totalLength : undefined)]
+      ]),
       renderInfoSection(t('table.tableInfo'), [
         [t('table.objectType'), objectType],
         [t('table.rowCount'), panelContext.rowCount ?? metadata.tableRows],
@@ -190,6 +230,8 @@ export class TableSchemaPanel {
       color: var(--vscode-foreground);
       background: var(--vscode-editor-background);
       font-size: 13px;
+      --grid-line: var(--vscode-contrastBorder, var(--vscode-editorWidget-border, var(--vscode-panel-border, rgba(127, 127, 127, .58))));
+      --grid-line-strong: var(--vscode-foreground);
     }
     .shell {
       display: grid;
@@ -257,6 +299,9 @@ export class TableSchemaPanel {
       gap: 6px;
     }
     .tool:hover { background: var(--vscode-toolbar-hoverBackground); }
+    .tool:not([disabled]) {
+      cursor: pointer;
+    }
     .tool[disabled] {
       color: var(--vscode-disabledForeground);
       opacity: .78;
@@ -297,10 +342,11 @@ export class TableSchemaPanel {
       width: 100%;
       border-collapse: collapse;
       table-layout: fixed;
+      border: 1px solid var(--grid-line-strong);
+      box-shadow: inset 0 0 0 1px var(--grid-line);
     }
     th, td {
-      border-right: 1px solid var(--vscode-panel-border);
-      border-bottom: 1px solid var(--vscode-panel-border);
+      border: 1px solid var(--grid-line);
       padding: 5px 8px;
       line-height: 19px;
       white-space: nowrap;
@@ -313,12 +359,19 @@ export class TableSchemaPanel {
       top: 0;
       z-index: 2;
       background: var(--vscode-editorGroupHeader-tabsBackground);
+      border-bottom-color: var(--grid-line-strong);
       font-weight: 600;
+    }
+    tbody tr:nth-child(even) {
+      background: color-mix(in srgb, var(--vscode-editor-background) 92%, var(--vscode-foreground) 8%);
     }
     tbody tr:hover { background: var(--vscode-list-hoverBackground); }
     tbody tr.selected {
       background: var(--vscode-list-activeSelectionBackground);
       color: var(--vscode-list-activeSelectionForeground);
+    }
+    tbody tr.selected td {
+      border-color: var(--grid-line-strong);
     }
     .check-cell { text-align: center; }
     input[type="checkbox"] {
@@ -425,6 +478,7 @@ export class TableSchemaPanel {
 
       <div class="toolbar" aria-label="Table design actions">
         <button class="tool" disabled>${t('common.save')}</button>
+        <button class="tool" id="mockDataButton">${t('table.mockDataAction')}</button>
         <button class="tool" disabled>${t('table.addColumnAction')}</button>
         <button class="tool" disabled>${t('table.insertColumnAction')}</button>
         <button class="tool" disabled>${t('table.dropColumnAction')}</button>
@@ -543,6 +597,7 @@ export class TableSchemaPanel {
   </div>
 
   <script>
+    const vscode = acquireVsCodeApi();
     const columnDetails = ${escapeScriptJson(JSON.stringify(columnDetails))};
     const initialTab = ${escapeScriptJson(JSON.stringify(initialTab))};
     const selectedIndexName = ${escapeScriptJson(JSON.stringify(selectedIndexName || null))};
@@ -562,6 +617,10 @@ export class TableSchemaPanel {
       tab.addEventListener('click', () => {
         activateTab(tab.dataset.tab);
       });
+    });
+
+    document.getElementById('mockDataButton')?.addEventListener('click', () => {
+      vscode.postMessage({ type: 'generateMockData' });
     });
 
     function updateColumnInfo(columnName) {
@@ -735,6 +794,41 @@ function formatBytes(value: unknown): string | undefined {
   }
 
   return `${size.toFixed(unitIndex === 0 ? 0 : 2)} ${units[unitIndex]} (${numericValue.toLocaleString()})`
+}
+
+function formatDuration(value: unknown): string | undefined {
+  const numericValue = Number(value)
+  if (!Number.isFinite(numericValue)) {
+    return undefined
+  }
+  if (numericValue < 1000) {
+    return `${numericValue.toFixed(0)} ms`
+  }
+  return `${(numericValue / 1000).toFixed(2)} s`
+}
+
+function formatPercent(value: unknown): string | undefined {
+  const numericValue = Number(value)
+  if (!Number.isFinite(numericValue)) {
+    return undefined
+  }
+  return `${(numericValue * 100).toFixed(1)}%`
+}
+
+function formatDateTime(value: unknown): string | undefined {
+  if (!value) {
+    return undefined
+  }
+  const date = new Date(String(value))
+  if (Number.isNaN(date.getTime())) {
+    return String(value)
+  }
+  return date.toLocaleString()
+}
+
+function toNumber(value: unknown): number | undefined {
+  const numericValue = Number(value)
+  return Number.isFinite(numericValue) ? numericValue : undefined
 }
 
 function formatEmpty(value: unknown): string {

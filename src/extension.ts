@@ -5,10 +5,11 @@ import { SUPPORTED_DRIVERS } from '@/core/constants'
 import { ConnectionTestResult, DatabaseDriverId, DbConnectionProfile, SchemaObject, SchemaScope, TableSchema } from '@/core/types'
 import { DriverRegistry } from '@/drivers/registry'
 import { getCurrentLanguage, initI18n, reloadI18n, t } from '@/i18n'
-import { ConnectionNode, ConnectionsTreeProvider, FieldNode, IndexNode, SchemaNode, TableDetailGroupNode, TablesGroupNode } from '@/providers/connectionsTree'
+import { ConnectionNode, ConnectionsTreeProvider, FieldNode, IndexNode, QueryFileNode, SchemaNode, TableDetailGroupNode, TablesGroupNode } from '@/providers/connectionsTree'
 import { ConnectionService } from '@/services/connectionService'
 import { connectionStatusManager } from '@/services/connectionStatusManager'
 import { QueryService } from '@/services/queryService'
+import { QueryFileService } from '@/services/queryFileService'
 import { SecretService } from '@/services/secretService'
 import { QueryHistoryService } from '@/services/queryHistoryService'
 import { ResultPanel } from '@/webviews/resultPanel'
@@ -34,6 +35,7 @@ type TableTarget = {
   objectType: SchemaObject['type']
   rowCount?: number
   description?: string
+  schema?: TableSchema
 }
 
 type FieldTarget = {
@@ -56,8 +58,9 @@ export async function activate(context: ExtensionContext): Promise<void> {
   const driverRegistry = new DriverRegistry(context.extensionPath)
   const connectionService = new ConnectionService(connectionStore, driverRegistry)
   const queryService = new QueryService(driverRegistry)
+  const queryFileService = new QueryFileService(Uri.joinPath(context.globalStorageUri, 'queries'))
 
-  connectionsTreeProvider = new ConnectionsTreeProvider(connectionService, context.extensionPath)
+  connectionsTreeProvider = new ConnectionsTreeProvider(connectionService, context.extensionPath, queryFileService)
   connectionsTreeView = window.createTreeView('dbNexus.connections', {
     treeDataProvider: connectionsTreeProvider,
     showCollapseAll: true
@@ -84,8 +87,12 @@ export async function activate(context: ExtensionContext): Promise<void> {
   }
 
   const resolveTableTarget = async (
-    node: FieldNode | IndexNode | SchemaNode | TableDetailGroupNode | TablesGroupNode | undefined
+    node: FieldNode | IndexNode | SchemaNode | TableDetailGroupNode | TablesGroupNode | TableTarget | undefined
   ): Promise<TableTarget | undefined> => {
+    if (isTableTarget(node)) {
+      return node
+    }
+
     if (node instanceof SchemaNode && isTableLikeNode(node)) {
       return {
         profile: node.connectionProfile,
@@ -177,6 +184,31 @@ export async function activate(context: ExtensionContext): Promise<void> {
     await window.showTextDocument(document)
   }
 
+  const runSqlFileUri = async (
+    profile: DbConnectionProfile,
+    scope: SchemaScope,
+    uri: Uri,
+    resultLabel: string = profile.name
+  ): Promise<void> => {
+    let sql = ''
+    try {
+      sql = new TextDecoder().decode(await workspace.fs.readFile(uri))
+      const result = await window.withProgress(
+        { location: ProgressLocation.Notification, title: t('table.runningSqlFile') },
+        () => executeSql(profile, sql, scope)
+      )
+      ResultPanel.show(context, t('query.resultTitle', resultLabel), result)
+      await QueryHistoryService.getInstance().add(sql, profile, result)
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      outputChannel.appendLine(message)
+      window.showErrorMessage(t('query.failed', message))
+      if (sql) {
+        await QueryHistoryService.getInstance().add(sql, profile, error instanceof Error ? error : new Error(message))
+      }
+    }
+  }
+
   const openInsertTemplate = async (
     node: FieldNode | IndexNode | SchemaNode | TableDetailGroupNode | TablesGroupNode | undefined
   ): Promise<void> => {
@@ -199,6 +231,47 @@ export async function activate(context: ExtensionContext): Promise<void> {
       const qualifiedName = getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)
       const columns = schema.columns.filter(column => !column.isAutoIncrement)
       await openSqlDocument(buildInsertTemplate(target.profile.driverId, qualifiedName, columns))
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      window.showErrorMessage(t('table.schemaFailed', message))
+    }
+  }
+
+  const openMockDataTemplate = async (
+    node: FieldNode | IndexNode | SchemaNode | TableDetailGroupNode | TablesGroupNode | TableTarget | undefined
+  ): Promise<void> => {
+    const target = await resolveTableTarget(node)
+    if (!target) return
+
+    if (target.objectType !== 'table') {
+      window.showWarningMessage(t('table.onlyTablesCanGenerateMutation'))
+      return
+    }
+
+    const rowCountText = await window.showInputBox({
+      prompt: t('table.mockRowCountPrompt'),
+      value: '20',
+      validateInput: (value) => {
+        const count = Number(value)
+        if (!Number.isInteger(count) || count <= 0 || count > 1000) {
+          return t('table.mockRowCountInvalid')
+        }
+        return undefined
+      }
+    })
+    if (!rowCountText) return
+
+    const rowCount = Number(rowCountText)
+    const driver = driverRegistry.getDriver(target.profile.driverId)
+    if (!driver?.getTableSchema && !target.schema) {
+      window.showErrorMessage(t('table.schemaNotSupported'))
+      return
+    }
+
+    try {
+      const schema = target.schema || await driver.getTableSchema!(target.profile, target.tableName, target.scope)
+      const sql = buildMockInsertTemplate(target.profile.driverId, target.scope, target.tableName, schema, rowCount)
+      await openSqlDocument(sql)
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
       window.showErrorMessage(t('table.schemaFailed', message))
@@ -339,13 +412,17 @@ export async function activate(context: ExtensionContext): Promise<void> {
     }
 
     try {
+      const startedAt = Date.now()
       const schema = await driver.getTableSchema(target.profile, target.tableName, target.scope)
+      const schemaLoadMs = Date.now() - startedAt
       TableSchemaPanel.show(context, t('table.schemaTitle', schema.name), schema, {
         profile: target.profile,
         scope: target.scope,
         objectType: target.objectType,
         rowCount: target.rowCount,
         description: target.description,
+        schemaLoadMs,
+        loadedAt: new Date().toISOString(),
         ...options
       })
     } catch (error: unknown) {
@@ -1182,10 +1259,80 @@ export async function activate(context: ExtensionContext): Promise<void> {
         window.showErrorMessage(t('table.schemaFailed', message))
       }
     }),
-    commands.registerCommand('dbNexus.generateData', async (node: SchemaNode | TablesGroupNode | undefined) => {
-      await openInsertTemplate(node)
+    commands.registerCommand('dbNexus.generateData', async (
+      node: FieldNode | IndexNode | SchemaNode | TableDetailGroupNode | TablesGroupNode | TableTarget | undefined
+    ) => {
+      await openMockDataTemplate(node)
     }),
-    commands.registerCommand('dbNexus.runSqlFile', async (node: ConnectionNode | SchemaNode | TablesGroupNode | undefined) => {
+    commands.registerCommand('dbNexus.createQueryFile', async (node: SchemaNode | TableDetailGroupNode | undefined) => {
+      const target = await resolveTableTarget(node)
+      if (!target) return
+
+      const fileName = await window.showInputBox({
+        prompt: t('table.newQueryFileName'),
+        value: `${target.tableName}.sql`,
+        validateInput: value => value.trim().length > 0 ? undefined : t('query.empty')
+      })
+      if (!fileName) return
+
+      try {
+        const file = await queryFileService.create(
+          target.profile,
+          target.tableName,
+          target.scope,
+          fileName,
+          buildSelectTemplate(target.profile.driverId, target.scope, target.tableName)
+        )
+        const document = await workspace.openTextDocument(file.uri)
+        await window.showTextDocument(document)
+        connectionsTreeProvider?.refreshTable(target.profile, target.tableName, target.scope)
+        window.showInformationMessage(t('table.queryFileCreated', file.name))
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error)
+        window.showErrorMessage(t('table.queryFileFailed', message))
+      }
+    }),
+    commands.registerCommand('dbNexus.addQueryFile', async (node: SchemaNode | TableDetailGroupNode | undefined) => {
+      const target = await resolveTableTarget(node)
+      if (!target) return
+
+      const uris = await window.showOpenDialog({
+        canSelectFiles: true,
+        canSelectFolders: false,
+        canSelectMany: true,
+        filters: {
+          'SQL Files': ['sql']
+        }
+      })
+      if (!uris || uris.length === 0) return
+
+      try {
+        const files = []
+        for (const uri of uris) {
+          files.push(await queryFileService.importFile(target.profile, target.tableName, target.scope, uri))
+        }
+        connectionsTreeProvider?.refreshTable(target.profile, target.tableName, target.scope)
+        window.showInformationMessage(
+          files.length === 1
+            ? t('table.queryFileAdded', files[0].name)
+            : t('table.queryFilesAdded', files.length)
+        )
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error)
+        window.showErrorMessage(t('table.queryFileFailed', message))
+      }
+    }),
+    commands.registerCommand('dbNexus.openQueryFile', async (node: QueryFileNode | undefined) => {
+      if (!node) return
+      const document = await workspace.openTextDocument(node.uri)
+      await window.showTextDocument(document)
+    }),
+    commands.registerCommand('dbNexus.runSqlFile', async (node: ConnectionNode | SchemaNode | TablesGroupNode | QueryFileNode | undefined) => {
+      if (node instanceof QueryFileNode) {
+        await runSqlFileUri(node.connectionProfile, node.scope, node.uri, `${node.connectionProfile.name} / ${node.fileName}`)
+        return
+      }
+
       const dbContext = await resolveNodeContext(node)
       if (!dbContext) return
 
@@ -1199,19 +1346,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
       })
       if (!uris || uris.length === 0) return
 
-      try {
-        const sql = new TextDecoder().decode(await workspace.fs.readFile(uris[0]))
-        const result = await window.withProgress(
-          { location: ProgressLocation.Notification, title: t('table.runningSqlFile') },
-          () => executeSql(dbContext.profile, sql, dbContext.scope)
-        )
-        ResultPanel.show(context, t('query.resultTitle', dbContext.profile.name), result)
-        await QueryHistoryService.getInstance().add(sql, dbContext.profile, result)
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error)
-        outputChannel.appendLine(message)
-        window.showErrorMessage(t('query.failed', message))
-      }
+      await runSqlFileUri(dbContext.profile, dbContext.scope, uris[0])
     }),
     commands.registerCommand('dbNexus.searchDatabase', async (node: ConnectionNode | SchemaNode | TablesGroupNode | undefined) => {
       const dbContext = await resolveNodeContext(node)
@@ -1799,6 +1934,18 @@ function isFileDriver(driverId: DatabaseDriverId): boolean {
   return ['csv', 'excel', 'json', 'parquet', 'avro'].includes(driverId)
 }
 
+function isTableTarget(value: unknown): value is TableTarget {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+
+  const target = value as Partial<TableTarget>
+  return !!target.profile
+    && typeof target.tableName === 'string'
+    && !!target.scope
+    && typeof target.objectType === 'string'
+}
+
 function isTableLikeNode(node: SchemaNode): boolean {
   return node.schemaObject.type === 'table'
     || node.schemaObject.type === 'view'
@@ -1866,6 +2013,331 @@ function buildInsertTemplate(
     ');',
     ''
   ].join('\n')
+}
+
+interface ColumnIndexHint {
+  primary: boolean
+  unique: boolean
+  indexed: boolean
+  leading: boolean
+  composite: boolean
+  indexNames: string[]
+}
+
+function buildMockInsertTemplate(
+  driverId: DatabaseDriverId,
+  scope: SchemaScope,
+  tableName: string,
+  schema: TableSchema,
+  rowCount: number
+): string {
+  const qualifiedName = getQualifiedObjectName(driverId, scope, tableName)
+  const writableColumns = schema.columns.filter(column => !column.isAutoIncrement)
+  const indexHints = buildColumnIndexHints(schema)
+  const header = buildMockHeader(schema, rowCount, writableColumns)
+
+  if (writableColumns.length === 0) {
+    return [
+      header,
+      ...Array.from({ length: rowCount }, () => `INSERT INTO ${qualifiedName} DEFAULT VALUES;`),
+      ''
+    ].join('\n')
+  }
+
+  const columnList = writableColumns
+    .map(column => `  ${quoteSqlIdentifier(driverId, column.name)}`)
+    .join(',\n')
+  const values = Array.from({ length: rowCount }, (_, rowIndex) => {
+    const rowValues = writableColumns.map(column => {
+      const hint = indexHints.get(column.name) || createEmptyIndexHint()
+      return mockSqlValue(column, hint, rowIndex, schema, rowCount)
+    })
+    return `  (${rowValues.join(', ')})`
+  })
+
+  return [
+    header,
+    `INSERT INTO ${qualifiedName} (`,
+    columnList,
+    ') VALUES',
+    `${values.join(',\n')};`,
+    ''
+  ].join('\n')
+}
+
+function buildMockHeader(
+  schema: TableSchema,
+  rowCount: number,
+  writableColumns: TableSchema['columns']
+): string {
+  const skippedColumns = schema.columns
+    .filter(column => column.isAutoIncrement)
+    .map(column => column.name)
+  const indexLines = schema.indexes.length > 0
+    ? schema.indexes.map(index => {
+        const kind = index.isPrimary ? 'PRIMARY' : index.isUnique ? 'UNIQUE' : 'INDEX'
+        return `-- ${kind} ${index.name}: ${index.columns.join(', ')}`
+      })
+    : ['-- No indexes detected; values are generated from column names and data types.']
+
+  return [
+    `-- DB Nexus mock data for ${schema.name}`,
+    `-- Rows: ${rowCount}`,
+    `-- Writable columns: ${writableColumns.map(column => column.name).join(', ') || 'DEFAULT VALUES'}`,
+    skippedColumns.length > 0 ? `-- Skipped auto-increment columns: ${skippedColumns.join(', ')}` : '',
+    '-- Index-aware generation:',
+    '-- Primary and unique index columns receive unique values; ordinary index columns use repeatable low-cardinality values.',
+    ...indexLines,
+    ''
+  ].filter(Boolean).join('\n')
+}
+
+function buildColumnIndexHints(schema: TableSchema): Map<string, ColumnIndexHint> {
+  const hints = new Map<string, ColumnIndexHint>()
+
+  for (const column of schema.columns) {
+    if (column.isPrimaryKey) {
+      const hint = getColumnIndexHint(hints, column.name)
+      hint.primary = true
+      hint.unique = true
+      hint.indexed = true
+      hint.leading = true
+    }
+  }
+
+  for (const index of schema.indexes) {
+    index.columns.forEach((columnName, columnIndex) => {
+      const hint = getColumnIndexHint(hints, columnName)
+      hint.indexed = true
+      hint.leading = hint.leading || columnIndex === 0
+      hint.composite = hint.composite || index.columns.length > 1
+      hint.primary = hint.primary || index.isPrimary
+      hint.unique = hint.unique || index.isUnique || index.isPrimary
+      hint.indexNames.push(index.name)
+    })
+  }
+
+  return hints
+}
+
+function getColumnIndexHint(hints: Map<string, ColumnIndexHint>, columnName: string): ColumnIndexHint {
+  if (!hints.has(columnName)) {
+    hints.set(columnName, createEmptyIndexHint())
+  }
+  return hints.get(columnName)!
+}
+
+function createEmptyIndexHint(): ColumnIndexHint {
+  return {
+    primary: false,
+    unique: false,
+    indexed: false,
+    leading: false,
+    composite: false,
+    indexNames: []
+  }
+}
+
+function mockSqlValue(
+  column: TableSchema['columns'][number],
+  hint: ColumnIndexHint,
+  rowIndex: number,
+  schema: TableSchema,
+  rowCount: number
+): string {
+  if (column.nullable && !hint.indexed && rowIndex % 11 === 10) {
+    return 'NULL'
+  }
+
+  const type = column.type.toLowerCase()
+  const name = column.name.toLowerCase()
+  const baseNumber = getMockBaseNumber(schema)
+  const sequence = baseNumber + rowIndex
+  const groupNumber = (rowIndex % Math.min(Math.max(rowCount, 1), 5)) + 1
+  const unique = hint.primary || hint.unique
+
+  if (isBooleanType(type) || name.startsWith('is_') || name.startsWith('has_')) {
+    return rowIndex % 2 === 0 ? 'TRUE' : 'FALSE'
+  }
+
+  if (isDateTimeType(type) || /(^|_)(created|updated|deleted|logged|modified)_?at$/.test(name)) {
+    return sqlString(buildMockDateTime(rowIndex))
+  }
+
+  if (isDateType(type) || name.endsWith('_date') || name === 'date') {
+    return sqlString(buildMockDate(rowIndex))
+  }
+
+  if (isTimeType(type)) {
+    return sqlString(`${String(8 + (rowIndex % 10)).padStart(2, '0')}:30:00`)
+  }
+
+  if (isJsonType(type)) {
+    return sqlString(JSON.stringify({ mock: true, row: sequence }))
+  }
+
+  if (isNumericType(type) || name === 'id' || name.endsWith('_id')) {
+    return mockNumericValue(type, name, sequence, groupNumber, hint, unique)
+  }
+
+  if (isUuidType(type, name)) {
+    return sqlString(buildMockUuid(sequence))
+  }
+
+  if (isBinaryType(type)) {
+    return column.nullable ? 'NULL' : sqlString(`mock_${sequence}`)
+  }
+
+  return sqlString(mockTextValue(name, sequence, groupNumber, hint, unique))
+}
+
+function mockNumericValue(
+  type: string,
+  name: string,
+  sequence: number,
+  groupNumber: number,
+  hint: ColumnIndexHint,
+  unique: boolean
+): string {
+  if (unique || hint.primary || name === 'id') {
+    return String(sequence)
+  }
+
+  if (hint.indexed) {
+    return String(groupNumber)
+  }
+
+  if (/(price|amount|total|balance|cost|salary|rate|ratio)/.test(name) || /(decimal|numeric|float|double|real)/.test(type)) {
+    return (19.9 + sequence * 1.37).toFixed(2)
+  }
+
+  if (/(count|qty|quantity|stock|age|score|level)/.test(name)) {
+    return String((sequence % 90) + 1)
+  }
+
+  return String(sequence)
+}
+
+function mockTextValue(
+  name: string,
+  sequence: number,
+  groupNumber: number,
+  hint: ColumnIndexHint,
+  unique: boolean
+): string {
+  if (name.includes('email')) {
+    return `user${sequence}@example.com`
+  }
+  if (name.includes('phone') || name.includes('mobile')) {
+    return `1380000${String(sequence % 10000).padStart(4, '0')}`
+  }
+  if (name.includes('url') || name.includes('website')) {
+    return `https://example.com/mock/${sequence}`
+  }
+  if (name.includes('status') || name.includes('state')) {
+    return ['active', 'pending', 'disabled', 'archived', 'draft'][groupNumber - 1]
+  }
+  if (name.includes('type') || name.includes('category') || name.includes('kind')) {
+    return ['standard', 'premium', 'internal', 'external', 'trial'][groupNumber - 1]
+  }
+  if (name.includes('code') || name.includes('sku')) {
+    return unique ? `MOCK-${sequence}` : `MOCK-G${groupNumber}`
+  }
+  if (name.includes('first_name')) {
+    return ['Alex', 'Sam', 'Taylor', 'Jordan', 'Casey'][groupNumber - 1]
+  }
+  if (name.includes('last_name')) {
+    return ['Chen', 'Wang', 'Li', 'Zhang', 'Liu'][groupNumber - 1]
+  }
+  if (name === 'name' || name.endsWith('_name') || name.includes('title')) {
+    return unique ? `Mock ${toTitleToken(name)} ${sequence}` : `Mock ${toTitleToken(name)} ${groupNumber}`
+  }
+  if (name.includes('city')) {
+    return ['Shanghai', 'Beijing', 'Shenzhen', 'Hangzhou', 'Chengdu'][groupNumber - 1]
+  }
+  if (name.includes('country')) {
+    return ['CN', 'US', 'JP', 'SG', 'DE'][groupNumber - 1]
+  }
+  if (name.includes('address')) {
+    return `Mock Road ${sequence}`
+  }
+  if (name.includes('note') || name.includes('comment') || name.includes('description')) {
+    return `Mock ${toTitleToken(name)} for row ${sequence}`
+  }
+
+  if (hint.indexed && !unique) {
+    return `${toSnakeToken(name)}_${groupNumber}`
+  }
+
+  return unique ? `${toSnakeToken(name)}_${sequence}` : `${toSnakeToken(name)} sample ${sequence}`
+}
+
+function getMockBaseNumber(schema: TableSchema): number {
+  const rowCount = Number(schema.metadata?.tableRows)
+  return Number.isFinite(rowCount) && rowCount >= 0 ? Math.floor(rowCount) + 1 : 1
+}
+
+function isNumericType(type: string): boolean {
+  return /(int|serial|number|numeric|decimal|float|double|real)/.test(type)
+}
+
+function isBooleanType(type: string): boolean {
+  return /(bool|boolean|bit\(1\))/.test(type)
+}
+
+function isDateTimeType(type: string): boolean {
+  return /(timestamp|datetime)/.test(type)
+}
+
+function isDateType(type: string): boolean {
+  return /\bdate\b/.test(type) && !isDateTimeType(type)
+}
+
+function isTimeType(type: string): boolean {
+  return /\btime\b/.test(type) && !isDateTimeType(type)
+}
+
+function isJsonType(type: string): boolean {
+  return /json/.test(type)
+}
+
+function isBinaryType(type: string): boolean {
+  return /(blob|binary|bytea|varbinary)/.test(type)
+}
+
+function isUuidType(type: string, name: string): boolean {
+  return type.includes('uuid') || name.includes('uuid') || name.includes('guid')
+}
+
+function buildMockDate(rowIndex: number): string {
+  const day = (rowIndex % 28) + 1
+  return `2026-01-${String(day).padStart(2, '0')}`
+}
+
+function buildMockDateTime(rowIndex: number): string {
+  const day = (rowIndex % 28) + 1
+  const hour = rowIndex % 24
+  return `2026-01-${String(day).padStart(2, '0')} ${String(hour).padStart(2, '0')}:00:00`
+}
+
+function buildMockUuid(sequence: number): string {
+  return `00000000-0000-4000-8000-${String(sequence).padStart(12, '0').slice(-12)}`
+}
+
+function sqlString(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`
+}
+
+function toSnakeToken(value: string): string {
+  return value.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'value'
+}
+
+function toTitleToken(value: string): string {
+  return toSnakeToken(value)
+    .split('_')
+    .filter(Boolean)
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ') || 'Value'
 }
 
 function buildSelectTemplate(

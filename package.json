@@ -285,9 +285,28 @@
         "category": "%dbNexus.category%"
       },
       {
+        "command": "dbNexus.createQueryFile",
+        "title": "%dbNexus.createQueryFile.title%",
+        "category": "%dbNexus.category%",
+        "icon": "$(new-file)"
+      },
+      {
+        "command": "dbNexus.addQueryFile",
+        "title": "%dbNexus.addQueryFile.title%",
+        "category": "%dbNexus.category%",
+        "icon": "$(file-add)"
+      },
+      {
+        "command": "dbNexus.openQueryFile",
+        "title": "%dbNexus.openQueryFile.title%",
+        "category": "%dbNexus.category%",
+        "icon": "$(go-to-file)"
+      },
+      {
         "command": "dbNexus.runSqlFile",
         "title": "%dbNexus.runSqlFile.title%",
-        "category": "%dbNexus.category%"
+        "category": "%dbNexus.category%",
+        "icon": "$(play)"
       },
       {
         "command": "dbNexus.searchDatabase",
@@ -584,6 +603,46 @@
           "group": "1_indexes@1"
         },
         {
+          "command": "dbNexus.createQueryFile",
+          "when": "view == dbNexus.connections && viewItem == table.queries",
+          "group": "inline@1"
+        },
+        {
+          "command": "dbNexus.addQueryFile",
+          "when": "view == dbNexus.connections && viewItem == table.queries",
+          "group": "inline@2"
+        },
+        {
+          "command": "dbNexus.createQueryFile",
+          "when": "view == dbNexus.connections && viewItem == table.queries",
+          "group": "1_queries@1"
+        },
+        {
+          "command": "dbNexus.addQueryFile",
+          "when": "view == dbNexus.connections && viewItem == table.queries",
+          "group": "1_queries@2"
+        },
+        {
+          "command": "dbNexus.openQueryFile",
+          "when": "view == dbNexus.connections && viewItem == query.file",
+          "group": "inline@1"
+        },
+        {
+          "command": "dbNexus.runSqlFile",
+          "when": "view == dbNexus.connections && viewItem == query.file",
+          "group": "inline@2"
+        },
+        {
+          "command": "dbNexus.openQueryFile",
+          "when": "view == dbNexus.connections && viewItem == query.file",
+          "group": "1_queryFile@1"
+        },
+        {
+          "command": "dbNexus.runSqlFile",
+          "when": "view == dbNexus.connections && viewItem == query.file",
+          "group": "1_queryFile@2"
+        },
+        {
           "command": "dbNexus.copyTableName",
           "when": "view == dbNexus.connections && viewItem == table",
           "group": "2_copy@1"
@@ -766,6 +825,11 @@
         {
           "command": "dbNexus.refreshTable",
           "when": "view == dbNexus.connections && viewItem == table.checks",
+          "group": "5_refresh@1"
+        },
+        {
+          "command": "dbNexus.refreshTable",
+          "when": "view == dbNexus.connections && viewItem == table.queries",
           "group": "5_refresh@1"
         },
         {

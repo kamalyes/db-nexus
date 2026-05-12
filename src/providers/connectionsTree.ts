@@ -24,6 +24,7 @@ import {
 import { t } from '@/i18n'
 import { ConnectionService } from '@/services/connectionService'
 import { connectionStatusManager, ConnectionStatusType } from '@/services/connectionStatusManager'
+import { QueryFileService } from '@/services/queryFileService'
 
 type ConnectionTreeNode =
   | ConnectionNode
@@ -33,10 +34,11 @@ type ConnectionTreeNode =
   | FieldNode
   | IndexNode
   | ForeignKeyNode
+  | QueryFileNode
   | PlaceholderNode
   | LoadingNode
 
-export type TableDetailGroupKind = 'columns' | 'indexes' | 'foreignKeys' | 'checks' | 'triggers'
+export type TableDetailGroupKind = 'columns' | 'indexes' | 'foreignKeys' | 'checks' | 'queries' | 'triggers'
 
 export class ConnectionNode {
   constructor(
@@ -126,6 +128,16 @@ class ForeignKeyNode {
   ) {}
 }
 
+export class QueryFileNode {
+  constructor(
+    public readonly connectionProfile: DbConnectionProfile,
+    public readonly tableName: string,
+    public readonly scope: SchemaScope,
+    public readonly fileName: string,
+    public readonly uri: Uri
+  ) {}
+}
+
 class PlaceholderNode {
   constructor(public readonly label: string) {}
 }
@@ -169,7 +181,8 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
 
   constructor(
     private readonly connectionService: ConnectionService,
-    private readonly extensionPath: string
+    private readonly extensionPath: string,
+    private readonly queryFileService: QueryFileService
   ) {
     connectionStatusManager.onDidChangeStatus(() => {
       this.refresh()
@@ -236,6 +249,10 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
 
     if (element instanceof ForeignKeyNode) {
       return this.getForeignKeyTreeItem(element)
+    }
+
+    if (element instanceof QueryFileNode) {
+      return this.getQueryFileTreeItem(element)
     }
 
     return new TreeItem('Unknown')
@@ -407,6 +424,7 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
       indexes: t('table.indexes'),
       foreignKeys: t('table.foreignKeys'),
       checks: t('table.checks'),
+      queries: t('table.queries'),
       triggers: t('table.triggers')
     }
     return labels[kind]
@@ -418,6 +436,7 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
       indexes: 'list-ordered',
       foreignKeys: 'link',
       checks: 'check',
+      queries: 'file-code',
       triggers: 'zap'
     }
     return new ThemeIcon(icons[kind])
@@ -462,6 +481,21 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
     ].filter(Boolean).join('\n')
     item.iconPath = new ThemeIcon('link')
     item.contextValue = 'foreignKey'
+    return item
+  }
+
+  private getQueryFileTreeItem(node: QueryFileNode): TreeItem {
+    const item = new TreeItem(node.fileName, TreeItemCollapsibleState.None)
+    item.id = this.getTreeItemId('query-file', node.connectionProfile.id, this.getScopeId(node.scope), node.tableName, node.fileName)
+    item.tooltip = node.uri.fsPath
+    item.resourceUri = node.uri
+    item.iconPath = new ThemeIcon('file-code')
+    item.contextValue = 'query.file'
+    item.command = {
+      command: 'dbNexus.openQueryFile',
+      title: t('table.openQueryFile'),
+      arguments: [node]
+    }
     return item
   }
 
@@ -610,6 +644,7 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
         new TableDetailGroupNode(node.connectionProfile, node.schemaObject.name, 'indexes', node.scope, schema.indexes.length),
         new TableDetailGroupNode(node.connectionProfile, node.schemaObject.name, 'foreignKeys', node.scope, schema.foreignKeys.length),
         new TableDetailGroupNode(node.connectionProfile, node.schemaObject.name, 'checks', node.scope),
+        new TableDetailGroupNode(node.connectionProfile, node.schemaObject.name, 'queries', node.scope, await this.getQueryFileCount(node)),
         new TableDetailGroupNode(node.connectionProfile, node.schemaObject.name, 'triggers', node.scope)
       ]
     } catch (error) {
@@ -620,6 +655,13 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
 
   private async getTableDetailGroupChildren(node: TableDetailGroupNode): Promise<ConnectionTreeNode[]> {
     try {
+      if (node.kind === 'queries') {
+        const files = await this.queryFileService.list(node.connectionProfile, node.tableName, node.scope)
+        return files.length > 0
+          ? files.map(file => new QueryFileNode(node.connectionProfile, node.tableName, node.scope, file.name, file.uri))
+          : [new PlaceholderNode(t('table.noQueryFiles'))]
+      }
+
       if (node.kind === 'checks' || node.kind === 'triggers') {
         return [new PlaceholderNode(t('table.notSupportedYet'))]
       }
@@ -761,6 +803,11 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
       return Uri.file(path.join(this.extensionPath, 'assets', 'icons', iconFile))
     }
     return this.getIconUri('database')
+  }
+
+  private async getQueryFileCount(node: SchemaNode): Promise<number | undefined> {
+    const files = await this.queryFileService.list(node.connectionProfile, node.schemaObject.name, node.scope)
+    return files.length > 0 ? files.length : undefined
   }
 
   private getConnectionStatusIcon(status: ConnectionStatusType): ThemeIcon {
