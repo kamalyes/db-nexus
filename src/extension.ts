@@ -234,8 +234,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
   }
 
   const getDefaultQueryScope = (profile: DbConnectionProfile): SchemaScope => ({
-    database: profile.database,
-    schema: profile.driverId === 'postgresql' || profile.driverId === 'cockroachdb' ? 'public' : undefined
+    database: profile.database
   })
 
   const runSqlFileUri = async (
@@ -2185,7 +2184,11 @@ function getQualifiedObjectName(
     if (scope.database) {
       parts.push(scope.database)
     }
-  } else if (driverId !== 'sqlite' && driverId !== 'duckdb') {
+  } else if (driverId === 'postgresql' || driverId === 'cockroachdb' || driverId === 'duckdb') {
+    if (scope.schema) {
+      parts.push(scope.schema)
+    }
+  } else if (driverId !== 'sqlite') {
     if (scope.schema) {
       parts.push(scope.schema)
     } else if (scope.database) {
@@ -2778,7 +2781,11 @@ function buildDropIndexSql(
   }
 
   const indexParts: string[] = []
-  if (driverId !== 'sqlite' && driverId !== 'duckdb') {
+  if (driverId === 'postgresql' || driverId === 'cockroachdb' || driverId === 'duckdb') {
+    if (scope.schema) {
+      indexParts.push(scope.schema)
+    }
+  } else if (driverId !== 'sqlite') {
     if (scope.schema) {
       indexParts.push(scope.schema)
     } else if (scope.database) {

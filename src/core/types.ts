@@ -212,6 +212,7 @@ export interface MutationPlan {
   schema?: string
   type: 'insert' | 'update' | 'delete'
   sql: string
+  parameters?: unknown[]
   description: string
 }
 

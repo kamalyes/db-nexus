@@ -176,31 +176,33 @@ export class PostgreSQLDriver implements DatabaseDriver {
   ): Promise<QueryResult> {
     const start = Date.now()
     const pool = await this.getPool(profile, scope.database || this.getDefaultDatabase(profile))
-    const schema = scope.schema || 'public'
-    const qualifiedTable = `${schema}.${tableName}`
+    const schema = await this.resolveTableSchema(pool, tableName, scope)
+    const qualifiedTable = this.getQualifiedTableName(tableName, schema)
 
     let sql = `SELECT * FROM ${qualifiedTable}`
+    const values: unknown[] = []
 
     if (options?.filters && options.filters.length > 0) {
       const whereClauses = options.filters.map(f => {
+        const column = quotePostgresIdentifier(f.column)
         if (f.operator === 'IS NULL') {
-          return `${f.column} IS NULL`
+          return `${column} IS NULL`
         }
         if (f.operator === 'IS NOT NULL') {
-          return `${f.column} IS NOT NULL`
+          return `${column} IS NOT NULL`
         }
         if (f.operator === 'IN' || f.operator === 'NOT IN') {
-          const values = Array.isArray(f.value) ? f.value : [f.value]
-          const placeholders = values.map(() => '?').join(', ')
-          return `${f.column} ${f.operator} (${placeholders})`
+          const filterValues = Array.isArray(f.value) ? f.value : [f.value]
+          const placeholders = filterValues.map(value => this.addQueryValue(value, values)).join(', ')
+          return `${column} ${f.operator} (${placeholders})`
         }
-        return `${f.column} ${f.operator} '${f.value}'`
+        return `${column} ${f.operator} ${this.addQueryValue(f.value, values)}`
       })
       sql += ` WHERE ${whereClauses.join(' AND ')}`
     }
 
     if (options?.sorts && options.sorts.length > 0) {
-      const orderClauses = options.sorts.map(s => `${s.column} ${s.direction}`)
+      const orderClauses = options.sorts.map(s => `${quotePostgresIdentifier(s.column)} ${s.direction}`)
       sql += ` ORDER BY ${orderClauses.join(', ')}`
     }
 
@@ -208,7 +210,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
     const offset = options?.offset || 0
     sql += ` LIMIT ${limit} OFFSET ${offset}`
 
-    const result = await pool.query(sql)
+    const result = await pool.query(sql, values)
 
     const columns = result.fields.map((field: { name: string; dataTypeID: number }) => ({
       name: field.name,
@@ -301,10 +303,52 @@ export class PostgreSQLDriver implements DatabaseDriver {
     }
   }
 
+  private addQueryValue(value: unknown, values: unknown[]): string {
+    values.push(value)
+    return `$${values.length}`
+  }
+
+  private getQualifiedTableName(tableName: string, schema: string | undefined): string {
+    const table = quotePostgresIdentifier(tableName)
+    return schema ? `${quotePostgresIdentifier(schema)}.${table}` : table
+  }
+
+  private async resolveTableSchema(pool: Pool, tableName: string, scope: SchemaScope): Promise<string | undefined> {
+    if (scope.schema) {
+      return scope.schema
+    }
+
+    const result = await pool.query(`
+      SELECT table_schema
+      FROM information_schema.tables
+      WHERE table_name = $1
+        AND table_schema NOT LIKE 'pg_%'
+        AND table_schema != 'information_schema'
+      ORDER BY
+        CASE
+          WHEN table_schema = current_schema() THEN 0
+          WHEN table_schema = 'public' THEN 1
+          ELSE 2
+        END,
+        table_schema
+      LIMIT 2
+    `, [tableName])
+
+    if (result.rows.length === 1) {
+      return String((result.rows[0] as { table_schema: string }).table_schema)
+    }
+
+    return undefined
+  }
+
   async getTableSchema(profile: DbConnectionProfile, tableName: string, scope: SchemaScope): Promise<TableSchema> {
     const pool = await this.getPool(profile, scope.database || this.getDefaultDatabase(profile))
-    const schema = scope.schema || 'public'
+    const schema = await this.resolveTableSchema(pool, tableName, scope)
     const metadata: TableSchema['metadata'] = {}
+
+    if (!schema) {
+      throw new Error(`Table ${tableName} not found. Select a schema if the table is outside the current search path.`)
+    }
 
     try {
       const tableInfoResult = await pool.query(`
@@ -494,12 +538,15 @@ export class PostgreSQLDriver implements DatabaseDriver {
     scope: SchemaScope
   ): Promise<MutationPlan> {
     const database = scope.database || this.getDefaultDatabase(profile)
-    const schema = scope.schema || 'public'
-    const qualifiedTable = `${schema}.${table}`
+    const schema = scope.schema
+    const qualifiedTable = this.getQualifiedTableName(table, schema)
 
-    const columns = Object.keys(row).join(', ')
-    const params = Object.keys(row).map((_, i) => `$${i + 1}`).join(', ')
-    const sql = `INSERT INTO ${qualifiedTable} (${columns}) VALUES (${params})`
+    const rowColumns = Object.keys(row)
+    const columns = rowColumns.map(quotePostgresIdentifier).join(', ')
+    const params = rowColumns.map((_, i) => `$${i + 1}`).join(', ')
+    const sql = rowColumns.length === 0
+      ? `INSERT INTO ${qualifiedTable} DEFAULT VALUES`
+      : `INSERT INTO ${qualifiedTable} (${columns}) VALUES (${params})`
 
     return {
       table,
@@ -507,6 +554,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
       schema,
       type: 'insert',
       sql,
+      parameters: Object.values(row),
       description: `Insert new row into ${qualifiedTable}`
     }
   }
@@ -519,8 +567,8 @@ export class PostgreSQLDriver implements DatabaseDriver {
     scope: SchemaScope
   ): Promise<MutationPlan> {
     const database = scope.database || this.getDefaultDatabase(profile)
-    const schema = scope.schema || 'public'
-    const qualifiedTable = `${schema}.${table}`
+    const schema = scope.schema
+    const qualifiedTable = this.getQualifiedTableName(table, schema)
 
     const tableSchema = await this.getTableSchema!(profile, table, scope)
     const primaryKeyColumns = tableSchema.columns.filter(c => c.isPrimaryKey).map(c => c.name)
@@ -529,12 +577,18 @@ export class PostgreSQLDriver implements DatabaseDriver {
       throw new Error('Cannot update table without primary key')
     }
 
-    const setClauses = Object.keys(row)
-      .filter(k => !primaryKeyColumns.includes(k))
-      .map((k, i) => `${k} = $${i + 1}`)
+    const setColumns = Object.keys(row).filter(k => !primaryKeyColumns.includes(k))
+    if (setColumns.length === 0) {
+      throw new Error('Cannot update row without editable columns')
+    }
+
+    const setClauses = setColumns
+      .map((k, i) => `${quotePostgresIdentifier(k)} = $${i + 1}`)
       .join(', ')
 
-    const whereClauses = primaryKeyColumns.map((k, i) => `${k} = $${Object.keys(row).filter(c => !primaryKeyColumns.includes(c)).length + i + 1}`).join(' AND ')
+    const whereClauses = primaryKeyColumns
+      .map((k, i) => `${quotePostgresIdentifier(k)} = $${setColumns.length + i + 1}`)
+      .join(' AND ')
 
     const sql = `UPDATE ${qualifiedTable} SET ${setClauses} WHERE ${whereClauses}`
 
@@ -544,6 +598,10 @@ export class PostgreSQLDriver implements DatabaseDriver {
       schema,
       type: 'update',
       sql,
+      parameters: [
+        ...setColumns.map(column => row[column]),
+        ...primaryKeyColumns.map(column => originalRow[column])
+      ],
       description: `Update row in ${qualifiedTable}`
     }
   }
@@ -555,8 +613,8 @@ export class PostgreSQLDriver implements DatabaseDriver {
     scope: SchemaScope
   ): Promise<MutationPlan> {
     const database = scope.database || this.getDefaultDatabase(profile)
-    const schema = scope.schema || 'public'
-    const qualifiedTable = `${schema}.${table}`
+    const schema = scope.schema
+    const qualifiedTable = this.getQualifiedTableName(table, schema)
 
     const tableSchema = await this.getTableSchema!(profile, table, scope)
     const primaryKeyColumns = tableSchema.columns.filter(c => c.isPrimaryKey).map(c => c.name)
@@ -565,7 +623,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
       throw new Error('Cannot delete from table without primary key')
     }
 
-    const whereClauses = primaryKeyColumns.map((k, i) => `${k} = $${i + 1}`).join(' AND ')
+    const whereClauses = primaryKeyColumns.map((k, i) => `${quotePostgresIdentifier(k)} = $${i + 1}`).join(' AND ')
     const sql = `DELETE FROM ${qualifiedTable} WHERE ${whereClauses}`
 
     return {
@@ -574,6 +632,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
       schema,
       type: 'delete',
       sql,
+      parameters: primaryKeyColumns.map(column => row[column]),
       description: `Delete row from ${qualifiedTable}`
     }
   }
@@ -583,15 +642,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
     plan: MutationPlan
   ): Promise<DataEditResult> {
     const pool = await this.getPool(profile, plan.database || this.getDefaultDatabase(profile))
-    const values = Object.values({
-      ...plan,
-      table: undefined,
-      database: undefined,
-      schema: undefined,
-      type: undefined,
-      sql: undefined,
-      description: undefined
-    })
+    const values = plan.parameters || []
 
     try {
       const result = await pool.query(plan.sql, values)
@@ -618,7 +669,11 @@ export class PostgreSQLDriver implements DatabaseDriver {
     scope: SchemaScope
   ): Promise<string> {
     const pool = await this.getPool(profile, scope.database || this.getDefaultDatabase(profile))
-    const schema = scope.schema || 'public'
+    const schema = await this.resolveTableSchema(pool, objectName, scope) || scope.schema
+
+    if (!schema && (objectType === 'table' || objectType === 'view' || objectType === 'index')) {
+      throw new Error(`${objectType} ${objectName} not found. Select a schema if it is outside the current search path.`)
+    }
 
     switch (objectType) {
       case 'table': {
@@ -664,7 +719,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
         `, [objectName, schema])
         
         for (const row of pkResult.rows as { constraint_name: string; columns: string[] }[]) {
-          ddl += `\n\nALTER TABLE ${schema}.${objectName} ADD CONSTRAINT ${row.constraint_name} PRIMARY KEY (${row.columns.map(c => `"${c}"`).join(', ')});`
+          ddl += `\n\nALTER TABLE ${quotePostgresIdentifier(schema!)}.${quotePostgresIdentifier(objectName)} ADD CONSTRAINT ${quotePostgresIdentifier(row.constraint_name)} PRIMARY KEY (${row.columns.map(c => quotePostgresIdentifier(c)).join(', ')});`
         }
         
         return ddl
@@ -682,7 +737,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
         }
         
         const definition = (result.rows[0] as { definition: string }).definition
-        return `CREATE OR REPLACE VIEW ${schema}.${objectName} AS\n${definition}`
+        return `CREATE OR REPLACE VIEW ${quotePostgresIdentifier(schema!)}.${quotePostgresIdentifier(objectName)} AS\n${definition}`
       }
       
       case 'index': {
