@@ -1,5 +1,5 @@
 import { commands, ExtensionContext, ViewColumn, WebviewPanel, window } from 'vscode'
-import { DbConnectionProfile, SchemaObject, SchemaScope, TableColumn, TableSchema } from '../core/types'
+import { DbConnectionProfile, SchemaObject, SchemaScope, TableColumn, TableDesignDraft, TableSchema } from '../core/types'
 import { t } from '../i18n'
 
 type TableSchemaTab = 'fields' | 'indexes' | 'foreignKeys' | 'checks' | 'triggers' | 'options' | 'comment' | 'sql'
@@ -20,6 +20,7 @@ interface TableSchemaPanelContext {
   selectedIndexName?: string
   schemaLoadMs?: number
   loadedAt?: string
+  mode?: 'design' | 'create'
 }
 
 export class TableSchemaPanel {
@@ -50,20 +51,22 @@ export class TableSchemaPanel {
     const objectType = panelContext.objectType || 'table'
     this.panels.add(record)
 
-    panel.webview.html = this.render(schema, panelContext)
+    let currentSchema = schema
+    let currentPanelContext = { ...panelContext }
+    panel.webview.html = this.render(currentSchema, currentPanelContext)
     const messageSubscription = panel.webview.onDidReceiveMessage(async message => {
-      if (!message?.type || !panelContext.profile) {
+      if (!message?.type || !currentPanelContext.profile) {
         return
       }
 
       const tableTarget = {
-        profile: panelContext.profile,
+        profile: currentPanelContext.profile,
         scope,
-        tableName: schema.name,
+        tableName: currentSchema.name,
         objectType,
-        rowCount: panelContext.rowCount,
-        description: panelContext.description,
-        schema
+        rowCount: currentPanelContext.rowCount,
+        description: currentPanelContext.description,
+        schema: currentSchema
       }
 
       if (message.type === 'generateMockData') {
@@ -76,17 +79,41 @@ export class TableSchemaPanel {
         return
       }
 
+      if (message.type === 'saveDesign' && isTableDesignDraft(message.draft)) {
+        const updatedSchema = await commands.executeCommand<TableSchema | undefined>('dbNexus.saveTableDesign', {
+          profile: currentPanelContext.profile,
+          scope,
+          tableName: currentSchema.name,
+          objectType,
+          originalSchema: currentSchema,
+          draft: message.draft,
+          mode: currentPanelContext.mode || 'design'
+        })
+        if (updatedSchema) {
+          currentSchema = updatedSchema
+          currentPanelContext = {
+            ...currentPanelContext,
+            mode: 'design',
+            initialTab: isTableSchemaTab(message.activeTab) ? message.activeTab : currentPanelContext.initialTab,
+            loadedAt: new Date().toISOString()
+          }
+          panel.title = t('table.schemaTitle', updatedSchema.name)
+          panel.webview.html = this.render(currentSchema, currentPanelContext)
+        }
+        return
+      }
+
       if (message.type === 'dropColumn' && typeof message.columnName === 'string') {
-        const column = schema.columns.find(item => item.name === message.columnName)
+        const column = currentSchema.columns.find(item => item.name === message.columnName)
         if (!column) {
           window.showWarningMessage(t('table.selectColumn'))
           return
         }
 
         await commands.executeCommand('dbNexus.dropColumn', {
-          profile: panelContext.profile,
+          profile: currentPanelContext.profile,
           scope,
-          tableName: schema.name,
+          tableName: currentSchema.name,
           columnName: column.name,
           columnType: column.type
         })
@@ -120,6 +147,8 @@ export class TableSchemaPanel {
     const qualifiedName = getQualifiedName(profile, scope, schema.name)
     const initialTab = panelContext.initialTab || 'fields'
     const selectedIndexName = panelContext.selectedIndexName
+    const mode = panelContext.mode || 'design'
+    const isCreateMode = mode === 'create'
     const canEdit = !!profile && objectType === 'table'
     const primaryKeys = schema.columns.filter(column => column.isPrimaryKey).map(column => column.name)
     const autoIncrementColumns = schema.columns.filter(column => column.isAutoIncrement).map(column => column.name)
@@ -133,43 +162,72 @@ export class TableSchemaPanel {
     const averageRowLength = toNumber(tableRows) && dataLength
       ? dataLength / Number(tableRows)
       : undefined
-    const columnDetails = schema.columns.map(column => ({
-      name: column.name,
-      type: column.type,
-      length: getTypeParts(column.type).length || '--',
-      decimals: getTypeParts(column.type).decimals || '--',
-      notNull: !column.nullable ? t('common.yes') : t('common.no'),
-      primaryKey: column.isPrimaryKey ? t('common.yes') : t('common.no'),
-      autoIncrement: column.isAutoIncrement ? t('common.yes') : t('common.no'),
-      defaultValue: formatEmpty(column.defaultValue),
-      comment: formatEmpty(column.comment),
-      position: column.position
+    const columnDetails = schema.columns.map(column => {
+      const typeParts = getTypeParts(column.type)
+      return {
+        name: column.name,
+        type: column.type,
+        length: typeParts.length || '--',
+        decimals: typeParts.decimals || '--',
+        notNull: !column.nullable ? t('common.yes') : t('common.no'),
+        primaryKey: column.isPrimaryKey ? t('common.yes') : t('common.no'),
+        autoIncrement: column.isAutoIncrement ? t('common.yes') : t('common.no'),
+        defaultValue: formatEmpty(column.defaultValue),
+        comment: formatEmpty(column.comment),
+        position: column.position
+      }
+    })
+    const designColumns = schema.columns.map(column => {
+      const typeParts = getTypeParts(column.type)
+      return {
+        id: `col_${column.position}_${column.name}`,
+        originalName: isCreateMode ? undefined : column.name,
+        name: column.name,
+        type: typeParts.baseType || column.type,
+        length: typeParts.length || '',
+        decimals: typeParts.decimals || '',
+        nullable: column.nullable,
+        defaultValue: column.defaultValue || '',
+        isPrimaryKey: column.isPrimaryKey,
+        isAutoIncrement: column.isAutoIncrement,
+        comment: column.comment || '',
+        position: column.position
+      }
+    })
+    const designIndexes = schema.indexes.map((index, indexPosition) => ({
+      id: `idx_${indexPosition}_${index.name}`,
+      originalName: isCreateMode ? undefined : index.name,
+      name: index.name,
+      columns: index.columns,
+      isUnique: index.isUnique,
+      isPrimary: index.isPrimary,
+      type: index.type || ''
     }))
 
     const fieldRowsHtml = schema.columns.map((column, index) => {
       const typeParts = getTypeParts(column.type)
       const keyLabel = column.isPrimaryKey ? `PK ${primaryKeys.indexOf(column.name) + 1}` : ''
       return `
-        <tr class="field-row ${index === 0 ? 'selected' : ''}" data-column="${escapeAttribute(column.name)}">
-          <td>${escapeHtml(column.name)}</td>
-          <td>${escapeHtml(typeParts.baseType || column.type)}</td>
-          <td>${escapeHtml(typeParts.length || '')}</td>
-          <td>${escapeHtml(typeParts.decimals || '')}</td>
-          <td class="check-cell"><input type="checkbox" disabled ${!column.nullable ? 'checked' : ''}></td>
-          <td class="check-cell"><input type="checkbox" disabled ${column.isAutoIncrement ? 'checked' : ''}></td>
-          <td>${escapeHtml(keyLabel)}</td>
-          <td>${escapeHtml(formatEmpty(column.defaultValue))}</td>
-          <td>${escapeHtml(formatEmpty(column.comment))}</td>
+        <tr class="field-row ${index === 0 ? 'selected' : ''}" data-column="${escapeAttribute(column.name)}" data-id="${escapeAttribute(designColumns[index].id)}">
+          <td data-edit="name">${escapeHtml(column.name)}</td>
+          <td data-edit="type">${escapeHtml(typeParts.baseType || column.type)}</td>
+          <td data-edit="length">${escapeHtml(typeParts.length || '')}</td>
+          <td data-edit="decimals">${escapeHtml(typeParts.decimals || '')}</td>
+          <td class="check-cell"><input data-edit="notNull" type="checkbox" ${canEdit ? '' : 'disabled'} ${!column.nullable ? 'checked' : ''}></td>
+          <td class="check-cell"><input data-edit="autoIncrement" type="checkbox" ${canEdit ? '' : 'disabled'} ${column.isAutoIncrement ? 'checked' : ''}></td>
+          <td data-edit="key">${escapeHtml(keyLabel)}</td>
+          <td data-edit="defaultValue">${escapeHtml(formatEmpty(column.defaultValue))}</td>
+          <td data-edit="comment">${escapeHtml(formatEmpty(column.comment))}</td>
         </tr>
       `
     }).join('')
 
-    const indexRowsHtml = schema.indexes.map(index => `
-      <tr class="index-row ${index.name === selectedIndexName ? 'selected' : ''}" data-index="${escapeAttribute(index.name)}">
-        <td>${escapeHtml(index.name)}</td>
-        <td>${escapeHtml(index.columns.join(', '))}</td>
-        <td class="check-cell"><input type="checkbox" disabled ${index.isUnique ? 'checked' : ''}></td>
-        <td>${index.isPrimary ? t('table.primaryKey') : escapeHtml(index.type || '')}</td>
+    const indexRowsHtml = schema.indexes.map((index, indexPosition) => `
+      <tr class="index-row ${index.name === selectedIndexName ? 'selected' : ''}" data-index="${escapeAttribute(index.name)}" data-id="${escapeAttribute(designIndexes[indexPosition].id)}">
+        <td data-edit="name">${escapeHtml(index.name)}</td>
+        <td data-edit="columns">${escapeHtml(index.columns.join(', '))}</td>
+        <td class="check-cell"><input data-edit="isUnique" type="checkbox" ${canEdit && !index.isPrimary ? '' : 'disabled'} ${index.isUnique ? 'checked' : ''}></td>
+        <td data-edit="type">${index.isPrimary ? t('table.primaryKey') : escapeHtml(index.type || '')}</td>
       </tr>
     `).join('')
 
@@ -400,6 +458,43 @@ export class TableSchemaPanel {
     tbody tr.selected td {
       border-color: var(--grid-line-strong);
     }
+    td.editable {
+      cursor: text;
+    }
+    td.dirty, tr.dirty td {
+      background: color-mix(in srgb, var(--vscode-list-highlightForeground) 10%, transparent);
+    }
+    .cell-editor, .table-name-input, .comment-editor {
+      width: 100%;
+      min-width: 0;
+      color: var(--vscode-input-foreground);
+      background: var(--vscode-input-background);
+      border: 1px solid var(--vscode-focusBorder);
+      border-radius: 2px;
+      font: inherit;
+      padding: 2px 4px;
+    }
+    .table-name-input {
+      max-width: 280px;
+      font-weight: 600;
+    }
+    .comment-editor {
+      min-height: 120px;
+      resize: vertical;
+    }
+    .panel-actions {
+      display: flex;
+      gap: 8px;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--vscode-panel-border);
+      background: var(--vscode-sideBar-background);
+    }
+    .status {
+      margin-left: auto;
+      color: var(--vscode-descriptionForeground);
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
     .check-cell { text-align: center; }
     input[type="checkbox"] {
       width: 14px;
@@ -499,19 +594,21 @@ export class TableSchemaPanel {
     <main class="main">
       <div class="titlebar">
         <div class="table-icon"></div>
-        <div class="title">${escapeHtml(schema.name)}</div>
+        <div class="title">${canEdit ? `<input class="table-name-input" id="tableNameInput" value="${escapeAttribute(schema.name)}">` : escapeHtml(schema.name)}</div>
         <div class="subtitle">${escapeHtml(qualifiedName)}</div>
       </div>
 
       <div class="toolbar" aria-label="Table design actions">
-        <button class="tool" disabled>${t('common.save')}</button>
-        <button class="tool" id="mockDataButton">${t('table.mockDataAction')}</button>
+        <button class="tool" id="saveDesignButton" ${canEdit ? 'disabled' : 'disabled'}>${t('common.save')}</button>
+        <button class="tool" id="mockDataButton" ${isCreateMode ? 'disabled' : ''}>${t('table.mockDataAction')}</button>
         <button class="tool" id="addColumnButton" ${canEdit ? '' : 'disabled'}>${t('table.addColumnAction')}</button>
         <button class="tool" id="insertColumnButton" ${canEdit ? '' : 'disabled'}>${t('table.insertColumnAction')}</button>
         <button class="tool" id="dropColumnButton" ${canEdit && schema.columns.length > 0 ? '' : 'disabled'}>${t('table.dropColumnAction')}</button>
-        <button class="tool" disabled>${t('table.primaryKey')}</button>
-        <button class="tool" disabled>${t('table.moveUp')}</button>
-        <button class="tool" disabled>${t('table.moveDown')}</button>
+        <button class="tool" id="addIndexButton" ${canEdit ? '' : 'disabled'}>${t('table.addIndexAction')}</button>
+        <button class="tool" id="dropIndexButton" ${canEdit && schema.indexes.some(index => !index.isPrimary) ? '' : 'disabled'}>${t('table.dropIndexAction')}</button>
+        <button class="tool" id="moveUpButton" ${canEdit && schema.columns.length > 1 ? '' : 'disabled'}>${t('table.moveUp')}</button>
+        <button class="tool" id="moveDownButton" ${canEdit && schema.columns.length > 1 ? '' : 'disabled'}>${t('table.moveDown')}</button>
+        <span class="status" id="designStatus">${isCreateMode ? t('table.unsavedDesign') : t('table.noPendingChanges')}</span>
       </div>
 
       <nav class="tabs" aria-label="Table schema tabs">
@@ -541,24 +638,27 @@ export class TableSchemaPanel {
                 <th>${t('table.comment')}</th>
               </tr>
             </thead>
-            <tbody>${fieldRowsHtml}</tbody>
+            <tbody id="fieldsBody">${fieldRowsHtml}</tbody>
           </table>
         </div>
 
         <div class="tab-panel ${getActiveClass(initialTab, 'indexes')}" id="tab-indexes">
-          ${schema.indexes.length > 0 ? `
-            <table>
-              <thead>
-                <tr>
-                  <th>${t('table.indexName')}</th>
-                  <th>${t('table.columns')}</th>
-                  <th style="width: 100px">${t('table.unique')}</th>
-                  <th style="width: 140px">${t('table.type')}</th>
-                </tr>
-              </thead>
-              <tbody>${indexRowsHtml}</tbody>
-            </table>
-          ` : `<div class="empty">${t('table.noIndexes')}</div>`}
+          <div class="panel-actions">
+            <button class="tool" id="addIndexPanelButton" ${canEdit ? '' : 'disabled'}>${t('table.addIndexAction')}</button>
+            <button class="tool" id="dropIndexPanelButton" ${canEdit && schema.indexes.some(index => !index.isPrimary) ? '' : 'disabled'}>${t('table.dropIndexAction')}</button>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>${t('table.indexName')}</th>
+                <th>${t('table.columns')}</th>
+                <th style="width: 100px">${t('table.unique')}</th>
+                <th style="width: 140px">${t('table.type')}</th>
+              </tr>
+            </thead>
+            <tbody id="indexesBody">${indexRowsHtml}</tbody>
+          </table>
+          <div class="empty" id="noIndexesMessage" ${schema.indexes.length > 0 ? 'hidden' : ''}>${t('table.noIndexes')}</div>
         </div>
 
         <div class="tab-panel ${getActiveClass(initialTab, 'foreignKeys')}" id="tab-foreignKeys">
@@ -591,10 +691,10 @@ export class TableSchemaPanel {
           ])}
         </div>
         <div class="tab-panel ${getActiveClass(initialTab, 'comment')}" id="tab-comment">
-          <div class="comment">${escapeHtml(formatEmpty(schema.comment))}</div>
+          ${canEdit ? `<textarea class="comment-editor" id="tableCommentInput">${escapeHtml(schema.comment || '')}</textarea>` : `<div class="comment">${escapeHtml(formatEmpty(schema.comment))}</div>`}
         </div>
         <div class="tab-panel ${getActiveClass(initialTab, 'sql')}" id="tab-sql">
-          <pre class="sql-preview">${escapeHtml(String(metadata.createSql || buildCreateTablePreview(profile, scope, schema)))}</pre>
+          <pre class="sql-preview" id="sqlPreview">${escapeHtml(String(metadata.createSql || buildCreateTablePreview(profile, scope, schema)))}</pre>
         </div>
       </section>
     </main>
@@ -625,10 +725,34 @@ export class TableSchemaPanel {
 
   <script>
     const vscode = acquireVsCodeApi();
-    const columnDetails = ${escapeScriptJson(JSON.stringify(columnDetails))};
+    const canEdit = ${canEdit ? 'true' : 'false'};
+    const isCreateMode = ${isCreateMode ? 'true' : 'false'};
+    const driverId = ${escapeScriptJson(JSON.stringify(profile?.driverId || 'postgresql'))};
+    const scope = ${escapeScriptJson(JSON.stringify(scope))};
+    let draftColumns = ${escapeScriptJson(JSON.stringify(designColumns))};
+    let draftIndexes = ${escapeScriptJson(JSON.stringify(designIndexes))};
     const initialTab = ${escapeScriptJson(JSON.stringify(initialTab))};
     const selectedIndexName = ${escapeScriptJson(JSON.stringify(selectedIndexName || null))};
-    let selectedColumnName = columnDetails[0] ? columnDetails[0].name : null;
+    const labels = ${escapeScriptJson(JSON.stringify({
+      yes: t('common.yes'),
+      no: t('common.no'),
+      noPending: t('table.noPendingChanges'),
+      pendingDesign: t('table.pendingDesignChanges'),
+      unsavedDesign: t('table.unsavedDesign'),
+      noIndexes: t('table.noIndexes'),
+      primaryKey: t('table.primaryKey'),
+      tableNameRequired: t('table.tableNameRequired'),
+      columnNameRequired: t('table.columnNameRequired'),
+      columnTypeRequired: t('table.columnTypeRequired'),
+      duplicateColumnName: t('table.duplicateColumnName'),
+      indexNameRequired: t('table.indexNameRequired'),
+      indexColumnRequired: t('table.indexColumnRequired'),
+      indexColumnUnknown: t('table.indexColumnUnknown')
+    }))};
+    let selectedColumnId = draftColumns[0] ? draftColumns[0].id : null;
+    let selectedIndexId = null;
+    let dirty = isCreateMode;
+    let rowIdSeed = Date.now();
 
     function activateTab(tabName) {
       const tab = document.querySelector('.tab[data-tab="' + tabName + '"]');
@@ -641,6 +765,522 @@ export class TableSchemaPanel {
       panel.classList.add('active');
     }
 
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    function escapeAttribute(value) {
+      return escapeHtml(value).replace(new RegExp(String.fromCharCode(96), 'g'), '&#096;');
+    }
+
+    function formatEmpty(value) {
+      return value === null || value === undefined || value === '' ? '--' : String(value);
+    }
+
+    function nextId(prefix) {
+      rowIdSeed += 1;
+      return prefix + '_' + rowIdSeed;
+    }
+
+    function normalizeName(value) {
+      return String(value || '').trim();
+    }
+
+    function composeType(column) {
+      const baseType = normalizeName(column.type) || 'varchar';
+      const length = normalizeName(column.length);
+      const decimals = normalizeName(column.decimals);
+      if (length && decimals) {
+        return baseType + '(' + length + ', ' + decimals + ')';
+      }
+      if (length) {
+        return baseType + '(' + length + ')';
+      }
+      return baseType;
+    }
+
+    function quoteIdentifier(identifier) {
+      const text = String(identifier);
+      if (driverId === 'mysql' || driverId === 'mariadb' || driverId === 'clickhouse') {
+        const tick = String.fromCharCode(96);
+        return tick + text.replace(new RegExp(tick, 'g'), tick + tick) + tick;
+      }
+      return '"' + text.replace(/"/g, '""') + '"';
+    }
+
+    function getQualifiedName(tableName) {
+      const parts = [];
+      if (driverId === 'mysql' || driverId === 'mariadb' || driverId === 'clickhouse') {
+        if (scope.database) parts.push(scope.database);
+      } else if (driverId === 'postgresql' || driverId === 'cockroachdb' || driverId === 'duckdb') {
+        if (scope.schema) parts.push(scope.schema);
+      } else if (driverId !== 'sqlite') {
+        if (scope.schema) parts.push(scope.schema);
+        else if (scope.database) parts.push(scope.database);
+      }
+      parts.push(tableName);
+      return parts.map(quoteIdentifier).join('.');
+    }
+
+    function getTableName() {
+      const input = document.getElementById('tableNameInput');
+      return normalizeName(input ? input.value : ${escapeScriptJson(JSON.stringify(schema.name))});
+    }
+
+    function getTableComment() {
+      const input = document.getElementById('tableCommentInput');
+      return input ? input.value : ${escapeScriptJson(JSON.stringify(schema.comment || ''))};
+    }
+
+    function getActiveTab() {
+      return document.querySelector('.tab.active')?.dataset.tab || initialTab;
+    }
+
+    function keyText(column) {
+      return column.isPrimaryKey ? labels.primaryKey : '';
+    }
+
+    function getColumnInfo(column) {
+      return {
+        name: column.name,
+        type: composeType(column),
+        length: column.length || '--',
+        decimals: column.decimals || '--',
+        notNull: !column.nullable ? labels.yes : labels.no,
+        primaryKey: column.isPrimaryKey ? labels.yes : labels.no,
+        autoIncrement: column.isAutoIncrement ? labels.yes : labels.no,
+        defaultValue: formatEmpty(column.defaultValue),
+        comment: formatEmpty(column.comment)
+      };
+    }
+
+    function updateColumnInfo(columnId) {
+      const detail = getColumnInfo(draftColumns.find(item => item.id === columnId) || draftColumns[0]);
+      if (!detail) return;
+
+      document.querySelectorAll('#columnInfo [data-field]').forEach(item => {
+        const field = item.dataset.field;
+        item.textContent = detail[field] || '--';
+      });
+    }
+
+    function updateToolbarState() {
+      const saveButton = document.getElementById('saveDesignButton');
+      if (saveButton) {
+        saveButton.disabled = !canEdit || !dirty;
+      }
+      const status = document.getElementById('designStatus');
+      if (status) {
+        status.textContent = dirty ? (isCreateMode ? labels.unsavedDesign : labels.pendingDesign) : labels.noPending;
+      }
+      const dropColumnButton = document.getElementById('dropColumnButton');
+      if (dropColumnButton) {
+        dropColumnButton.disabled = !canEdit || draftColumns.length === 0 || !selectedColumnId;
+      }
+      const moveUpButton = document.getElementById('moveUpButton');
+      const moveDownButton = document.getElementById('moveDownButton');
+      const columnIndex = draftColumns.findIndex(item => item.id === selectedColumnId);
+      if (moveUpButton) {
+        moveUpButton.disabled = !canEdit || columnIndex <= 0;
+      }
+      if (moveDownButton) {
+        moveDownButton.disabled = !canEdit || columnIndex < 0 || columnIndex >= draftColumns.length - 1;
+      }
+      const hasDroppableIndex = draftIndexes.some(index => !index.isPrimary);
+      ['dropIndexButton', 'dropIndexPanelButton'].forEach(id => {
+        const button = document.getElementById(id);
+        if (button) {
+          const selectedIndex = draftIndexes.find(index => index.id === selectedIndexId);
+          button.disabled = !canEdit || !hasDroppableIndex || !selectedIndex || selectedIndex.isPrimary;
+        }
+      });
+    }
+
+    function markDirty() {
+      if (!canEdit) return;
+      dirty = true;
+      updateToolbarState();
+      updateSqlPreview();
+    }
+
+    function renderFields() {
+      const body = document.getElementById('fieldsBody');
+      if (!body) return;
+      body.innerHTML = draftColumns.map(column => {
+        const selected = column.id === selectedColumnId ? 'selected' : '';
+        const dirtyClass = column.originalName ? '' : 'dirty';
+        return [
+          '<tr class="field-row ' + selected + ' ' + dirtyClass + '" data-column="' + escapeAttribute(column.name) + '" data-id="' + escapeAttribute(column.id) + '">',
+          '<td class="' + (canEdit ? 'editable' : '') + '" data-edit="name">' + escapeHtml(column.name) + '</td>',
+          '<td class="' + (canEdit ? 'editable' : '') + '" data-edit="type">' + escapeHtml(column.type) + '</td>',
+          '<td class="' + (canEdit ? 'editable' : '') + '" data-edit="length">' + escapeHtml(column.length || '') + '</td>',
+          '<td class="' + (canEdit ? 'editable' : '') + '" data-edit="decimals">' + escapeHtml(column.decimals || '') + '</td>',
+          '<td class="check-cell"><input data-edit="notNull" type="checkbox" ' + (canEdit ? '' : 'disabled') + (!column.nullable ? ' checked' : '') + '></td>',
+          '<td class="check-cell"><input data-edit="autoIncrement" type="checkbox" ' + (canEdit ? '' : 'disabled') + (column.isAutoIncrement ? ' checked' : '') + '></td>',
+          '<td class="' + (canEdit ? 'editable' : '') + '" data-edit="key">' + escapeHtml(keyText(column)) + '</td>',
+          '<td class="' + (canEdit ? 'editable' : '') + '" data-edit="defaultValue">' + escapeHtml(formatEmpty(column.defaultValue)) + '</td>',
+          '<td class="' + (canEdit ? 'editable' : '') + '" data-edit="comment">' + escapeHtml(formatEmpty(column.comment)) + '</td>',
+          '</tr>'
+        ].join('');
+      }).join('');
+      bindFieldRows();
+      updateColumnInfo(selectedColumnId);
+      updateToolbarState();
+    }
+
+    function renderIndexes() {
+      const body = document.getElementById('indexesBody');
+      if (!body) return;
+      body.innerHTML = draftIndexes.map(index => {
+        const selected = index.id === selectedIndexId ? 'selected' : '';
+        const dirtyClass = index.originalName ? '' : 'dirty';
+        return [
+          '<tr class="index-row ' + selected + ' ' + dirtyClass + '" data-index="' + escapeAttribute(index.name) + '" data-id="' + escapeAttribute(index.id) + '">',
+          '<td class="' + (canEdit && !index.isPrimary ? 'editable' : '') + '" data-edit="name">' + escapeHtml(index.name) + '</td>',
+          '<td class="' + (canEdit && !index.isPrimary ? 'editable' : '') + '" data-edit="columns">' + escapeHtml(index.columns.join(', ')) + '</td>',
+          '<td class="check-cell"><input data-edit="isUnique" type="checkbox" ' + (canEdit && !index.isPrimary ? '' : 'disabled') + (index.isUnique ? ' checked' : '') + '></td>',
+          '<td class="' + (canEdit && !index.isPrimary ? 'editable' : '') + '" data-edit="type">' + escapeHtml(index.isPrimary ? labels.primaryKey : (index.type || '')) + '</td>',
+          '</tr>'
+        ].join('');
+      }).join('');
+      const noIndexesMessage = document.getElementById('noIndexesMessage');
+      if (noIndexesMessage) {
+        noIndexesMessage.hidden = draftIndexes.length > 0;
+      }
+      bindIndexRows();
+      updateToolbarState();
+    }
+
+    function bindFieldRows() {
+      document.querySelectorAll('.field-row').forEach(row => {
+        row.addEventListener('click', () => {
+          document.querySelectorAll('.field-row').forEach(item => item.classList.remove('selected'));
+          row.classList.add('selected');
+          selectedColumnId = row.dataset.id;
+          updateColumnInfo(selectedColumnId);
+          updateToolbarState();
+        });
+        row.querySelectorAll('td[data-edit]').forEach(cell => {
+          cell.addEventListener('dblclick', event => {
+            event.stopPropagation();
+            startFieldEditor(row.dataset.id, cell);
+          });
+        });
+        row.querySelectorAll('input[type="checkbox"]').forEach(input => {
+          input.addEventListener('change', () => {
+            const column = draftColumns.find(item => item.id === row.dataset.id);
+            if (!column) return;
+            if (input.dataset.edit === 'notNull') {
+              column.nullable = !input.checked;
+            } else if (input.dataset.edit === 'autoIncrement') {
+              column.isAutoIncrement = input.checked;
+            }
+            markDirty();
+            updateColumnInfo(column.id);
+          });
+        });
+      });
+    }
+
+    function bindIndexRows() {
+      document.querySelectorAll('.index-row').forEach(row => {
+        row.addEventListener('click', () => {
+          document.querySelectorAll('.index-row').forEach(item => item.classList.remove('selected'));
+          row.classList.add('selected');
+          selectedIndexId = row.dataset.id;
+          updateToolbarState();
+        });
+        row.querySelectorAll('td[data-edit]').forEach(cell => {
+          cell.addEventListener('dblclick', event => {
+            event.stopPropagation();
+            startIndexEditor(row.dataset.id, cell);
+          });
+        });
+        row.querySelector('input[data-edit="isUnique"]')?.addEventListener('change', event => {
+          const index = draftIndexes.find(item => item.id === row.dataset.id);
+          if (!index || index.isPrimary) return;
+          index.isUnique = event.target.checked;
+          markDirty();
+        });
+      });
+    }
+
+    function startFieldEditor(columnId, cell) {
+      if (!canEdit || cell.querySelector('input, select')) return;
+      const column = draftColumns.find(item => item.id === columnId);
+      if (!column) return;
+      const field = cell.dataset.edit;
+      const originalHtml = cell.innerHTML;
+      const editor = field === 'key' ? document.createElement('select') : document.createElement('input');
+      editor.className = 'cell-editor';
+      if (field === 'key') {
+        editor.innerHTML = '<option value=""></option><option value="primary">' + escapeHtml(labels.primaryKey) + '</option>';
+        editor.value = column.isPrimaryKey ? 'primary' : '';
+      } else {
+        editor.value = field === 'defaultValue' || field === 'comment'
+          ? (column[field] || '')
+          : (column[field] || '');
+      }
+      cell.innerHTML = '';
+      cell.appendChild(editor);
+      editor.focus();
+      if (editor.select) editor.select();
+
+      let finished = false;
+      const finish = (commit) => {
+        if (finished) return;
+        finished = true;
+        if (commit) {
+          if (field === 'key') {
+            column.isPrimaryKey = editor.value === 'primary';
+            if (column.isPrimaryKey) column.nullable = false;
+          } else if (field === 'name' || field === 'type' || field === 'length' || field === 'decimals' || field === 'defaultValue' || field === 'comment') {
+            const previousName = column.name;
+            column[field] = editor.value.trim();
+            if (field === 'name' && previousName !== column.name) {
+              draftIndexes = draftIndexes.map(index => ({
+                ...index,
+                columns: index.columns.map(item => item === previousName ? column.name : item)
+              }));
+            }
+          }
+          markDirty();
+          renderFields();
+          renderIndexes();
+          return;
+        }
+        cell.innerHTML = originalHtml;
+      };
+
+      editor.addEventListener('keydown', event => {
+        if (event.key === 'Enter') finish(true);
+        if (event.key === 'Escape') finish(false);
+      });
+      editor.addEventListener('blur', () => finish(true));
+    }
+
+    function startIndexEditor(indexId, cell) {
+      if (!canEdit || cell.querySelector('input')) return;
+      const index = draftIndexes.find(item => item.id === indexId);
+      if (!index || index.isPrimary) return;
+      const field = cell.dataset.edit;
+      const originalHtml = cell.innerHTML;
+      const editor = document.createElement('input');
+      editor.className = 'cell-editor';
+      editor.value = field === 'columns' ? index.columns.join(', ') : (index[field] || '');
+      cell.innerHTML = '';
+      cell.appendChild(editor);
+      editor.focus();
+      editor.select();
+
+      let finished = false;
+      const finish = (commit) => {
+        if (finished) return;
+        finished = true;
+        if (commit) {
+          if (field === 'columns') {
+            index.columns = editor.value.split(',').map(item => item.trim()).filter(Boolean);
+          } else {
+            index[field] = editor.value.trim();
+          }
+          markDirty();
+          renderIndexes();
+          return;
+        }
+        cell.innerHTML = originalHtml;
+      };
+
+      editor.addEventListener('keydown', event => {
+        if (event.key === 'Enter') finish(true);
+        if (event.key === 'Escape') finish(false);
+      });
+      editor.addEventListener('blur', () => finish(true));
+    }
+
+    function nextColumnName() {
+      const used = new Set(draftColumns.map(column => column.name));
+      let index = 1;
+      let name = 'new_field';
+      while (used.has(name)) {
+        name = 'new_field_' + index;
+        index += 1;
+      }
+      return name;
+    }
+
+    function addColumn(beforeSelected) {
+      if (!canEdit) return;
+      const column = {
+        id: nextId('col'),
+        name: nextColumnName(),
+        type: driverId === 'postgresql' || driverId === 'cockroachdb' ? 'varchar' : 'varchar',
+        length: '255',
+        decimals: '',
+        nullable: true,
+        defaultValue: '',
+        isPrimaryKey: false,
+        isAutoIncrement: false,
+        comment: '',
+        position: draftColumns.length + 1
+      };
+      let insertAt = beforeSelected ? draftColumns.findIndex(item => item.id === selectedColumnId) : draftColumns.findIndex(item => item.id === selectedColumnId) + 1;
+      if (insertAt < 0) insertAt = draftColumns.length;
+      draftColumns.splice(insertAt, 0, column);
+      selectedColumnId = column.id;
+      markDirty();
+      renderFields();
+    }
+
+    function dropSelectedColumn() {
+      if (!canEdit || !selectedColumnId) return;
+      const index = draftColumns.findIndex(item => item.id === selectedColumnId);
+      if (index < 0) return;
+      const removed = draftColumns[index];
+      draftColumns.splice(index, 1);
+      draftIndexes = draftIndexes
+        .map(item => ({ ...item, columns: item.columns.filter(column => column !== removed.name) }))
+        .filter(item => item.isPrimary || item.columns.length > 0);
+      selectedColumnId = draftColumns[Math.min(index, draftColumns.length - 1)]?.id || null;
+      markDirty();
+      renderFields();
+      renderIndexes();
+    }
+
+    function moveSelectedColumn(delta) {
+      const index = draftColumns.findIndex(item => item.id === selectedColumnId);
+      const nextIndex = index + delta;
+      if (index < 0 || nextIndex < 0 || nextIndex >= draftColumns.length) return;
+      const [column] = draftColumns.splice(index, 1);
+      draftColumns.splice(nextIndex, 0, column);
+      markDirty();
+      renderFields();
+    }
+
+    function nextIndexName(columns) {
+      const tableName = getTableName() || 'table';
+      const suffix = columns.length > 0 ? columns.join('_') : 'idx';
+      const used = new Set(draftIndexes.map(index => index.name));
+      let name = 'idx_' + tableName + '_' + suffix;
+      let counter = 1;
+      while (used.has(name)) {
+        name = 'idx_' + tableName + '_' + suffix + '_' + counter;
+        counter += 1;
+      }
+      return name;
+    }
+
+    function addIndex() {
+      if (!canEdit || draftColumns.length === 0) return;
+      activateTab('indexes');
+      const columns = [draftColumns.find(column => !column.isPrimaryKey)?.name || draftColumns[0].name];
+      const index = {
+        id: nextId('idx'),
+        name: nextIndexName(columns),
+        columns,
+        isUnique: false,
+        isPrimary: false,
+        type: ''
+      };
+      draftIndexes.push(index);
+      selectedIndexId = index.id;
+      markDirty();
+      renderIndexes();
+    }
+
+    function dropSelectedIndex() {
+      const index = draftIndexes.findIndex(item => item.id === selectedIndexId);
+      if (index < 0 || draftIndexes[index].isPrimary) return;
+      draftIndexes.splice(index, 1);
+      selectedIndexId = draftIndexes[Math.min(index, draftIndexes.length - 1)]?.id || null;
+      markDirty();
+      renderIndexes();
+    }
+
+    function updateSqlPreview() {
+      const preview = document.getElementById('sqlPreview');
+      if (!preview) return;
+      const tableName = getTableName() || 'new_table';
+      const columnLines = draftColumns.map(column => {
+        const parts = ['  ' + quoteIdentifier(column.name), composeType(column)];
+        if (!column.nullable || column.isPrimaryKey) parts.push('NOT NULL');
+        if (column.defaultValue) parts.push('DEFAULT ' + column.defaultValue);
+        if (column.isAutoIncrement && (driverId === 'mysql' || driverId === 'mariadb')) parts.push('AUTO_INCREMENT');
+        return parts.join(' ');
+      });
+      const primaryKeys = draftColumns.filter(column => column.isPrimaryKey).map(column => quoteIdentifier(column.name));
+      if (primaryKeys.length > 0) {
+        columnLines.push('  PRIMARY KEY (' + primaryKeys.join(', ') + ')');
+      }
+      const indexLines = draftIndexes
+        .filter(index => !index.isPrimary && index.name && index.columns.length > 0)
+        .map(index => 'CREATE ' + (index.isUnique ? 'UNIQUE ' : '') + 'INDEX ' + quoteIdentifier(index.name) + ' ON ' + getQualifiedName(tableName) + ' (' + index.columns.map(quoteIdentifier).join(', ') + ');');
+      preview.textContent = [
+        'CREATE TABLE ' + getQualifiedName(tableName) + ' (',
+        columnLines.join(',\\n') || '  -- add fields',
+        ');',
+        ...indexLines,
+        ''
+      ].join('\\n');
+    }
+
+    function validateDraft() {
+      const tableName = getTableName();
+      if (!tableName) return labels.tableNameRequired;
+      if (draftColumns.length === 0) return labels.columnNameRequired;
+      const seenColumns = new Set();
+      const columnNames = new Set();
+      for (const column of draftColumns) {
+        column.name = normalizeName(column.name);
+        column.type = normalizeName(column.type);
+        if (!column.name) return labels.columnNameRequired;
+        if (!column.type) return labels.columnTypeRequired;
+        const key = column.name.toLowerCase();
+        if (seenColumns.has(key)) return labels.duplicateColumnName.replace('{0}', column.name);
+        seenColumns.add(key);
+        columnNames.add(column.name);
+      }
+      for (const index of draftIndexes) {
+        if (index.isPrimary) continue;
+        index.name = normalizeName(index.name);
+        if (!index.name) return labels.indexNameRequired;
+        if (index.columns.length === 0) return labels.indexColumnRequired;
+        const missing = index.columns.find(column => !columnNames.has(column));
+        if (missing) return labels.indexColumnUnknown.replace('{0}', missing);
+      }
+      return '';
+    }
+
+    function saveDesign() {
+      if (!canEdit) return;
+      const validationMessage = validateDraft();
+      if (validationMessage) {
+        alert(validationMessage);
+        return;
+      }
+      const draft = {
+        tableName: getTableName(),
+        comment: getTableComment(),
+        columns: draftColumns.map((column, index) => ({
+          ...column,
+          type: normalizeName(column.type),
+          length: normalizeName(column.length),
+          decimals: normalizeName(column.decimals),
+          defaultValue: column.defaultValue || '',
+          comment: column.comment || '',
+          position: index + 1
+        })),
+        indexes: draftIndexes
+          .filter(index => index.isPrimary || (index.name && index.columns.length > 0))
+          .map(index => ({ ...index }))
+      };
+      vscode.postMessage({ type: 'saveDesign', activeTab: getActiveTab(), draft });
+    }
+
     document.querySelectorAll('.tab').forEach(tab => {
       tab.addEventListener('click', () => {
         activateTab(tab.dataset.tab);
@@ -651,48 +1291,55 @@ export class TableSchemaPanel {
       vscode.postMessage({ type: 'generateMockData' });
     });
     document.getElementById('addColumnButton')?.addEventListener('click', () => {
-      vscode.postMessage({ type: 'addColumn' });
+      addColumn(false);
     });
     document.getElementById('insertColumnButton')?.addEventListener('click', () => {
-      vscode.postMessage({ type: 'insertColumn' });
+      addColumn(true);
     });
     document.getElementById('dropColumnButton')?.addEventListener('click', () => {
-      if (!selectedColumnName) return;
-      vscode.postMessage({ type: 'dropColumn', columnName: selectedColumnName });
+      dropSelectedColumn();
     });
-
-    function updateColumnInfo(columnName) {
-      const detail = columnDetails.find(item => item.name === columnName) || columnDetails[0];
-      if (!detail) return;
-
-      document.querySelectorAll('#columnInfo [data-field]').forEach(item => {
-        const field = item.dataset.field;
-        item.textContent = detail[field] || '--';
-      });
-    }
-
-    document.querySelectorAll('.field-row').forEach(row => {
-      row.addEventListener('click', () => {
-        document.querySelectorAll('.field-row').forEach(item => item.classList.remove('selected'));
-        row.classList.add('selected');
-        selectedColumnName = row.dataset.column;
-        updateColumnInfo(row.dataset.column);
-      });
+    document.getElementById('moveUpButton')?.addEventListener('click', () => moveSelectedColumn(-1));
+    document.getElementById('moveDownButton')?.addEventListener('click', () => moveSelectedColumn(1));
+    document.getElementById('addIndexButton')?.addEventListener('click', addIndex);
+    document.getElementById('addIndexPanelButton')?.addEventListener('click', addIndex);
+    document.getElementById('dropIndexButton')?.addEventListener('click', dropSelectedIndex);
+    document.getElementById('dropIndexPanelButton')?.addEventListener('click', dropSelectedIndex);
+    document.getElementById('saveDesignButton')?.addEventListener('click', saveDesign);
+    document.getElementById('tableNameInput')?.addEventListener('input', () => {
+      const sideTitle = document.querySelector('.side-title');
+      if (sideTitle) sideTitle.textContent = getTableName();
+      markDirty();
     });
-
-    if (columnDetails.length > 0) {
-      updateColumnInfo(columnDetails[0].name);
-    }
-
-    activateTab(initialTab);
+    document.getElementById('tableCommentInput')?.addEventListener('input', markDirty);
 
     if (selectedIndexName) {
+      const selectedIndex = draftIndexes.find(index => index.name === selectedIndexName);
+      selectedIndexId = selectedIndex ? selectedIndex.id : null;
+    }
+
+    renderFields();
+    renderIndexes();
+    updateSqlPreview();
+    updateToolbarState();
+
+    if (selectedIndexId) {
       const selectedIndexRow = Array.from(document.querySelectorAll('.index-row'))
-        .find(row => row.dataset.index === selectedIndexName);
+        .find(row => row.dataset.id === selectedIndexId);
       if (selectedIndexRow) {
         selectedIndexRow.scrollIntoView({ block: 'center' });
       }
     }
+
+    if (isCreateMode) {
+      const input = document.getElementById('tableNameInput');
+      if (input) {
+        input.focus();
+        input.select();
+      }
+    }
+
+    activateTab(initialTab);
   </script>
 </body>
 </html>`
@@ -701,6 +1348,28 @@ export class TableSchemaPanel {
 
 function getActiveClass(activeTab: TableSchemaTab, tab: TableSchemaTab): string {
   return activeTab === tab ? 'active' : ''
+}
+
+function isTableSchemaTab(value: unknown): value is TableSchemaTab {
+  return value === 'fields'
+    || value === 'indexes'
+    || value === 'foreignKeys'
+    || value === 'checks'
+    || value === 'triggers'
+    || value === 'options'
+    || value === 'comment'
+    || value === 'sql'
+}
+
+function isTableDesignDraft(value: unknown): value is TableDesignDraft {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+
+  const draft = value as Partial<TableDesignDraft>
+  return typeof draft.tableName === 'string'
+    && Array.isArray(draft.columns)
+    && Array.isArray(draft.indexes)
 }
 
 function isScopeWithin(scope: SchemaScope, targetScope: SchemaScope): boolean {

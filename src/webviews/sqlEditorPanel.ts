@@ -1,12 +1,11 @@
 import { ExtensionContext, Uri, ViewColumn, WebviewPanel, window, workspace } from 'vscode'
-import { DbConnectionProfile, SchemaObject, SchemaScope } from '@/core/types'
+import { DbConnectionProfile, QueryResult, SchemaObject, SchemaScope } from '@/core/types'
 import { DriverRegistry } from '@/drivers/registry'
 import { t } from '@/i18n'
 import { ConnectionService } from '@/services/connectionService'
-import { QueryHistoryItem, QueryHistoryService } from '@/services/queryHistoryService'
+import { QueryHistoryService } from '@/services/queryHistoryService'
 import { QueryService } from '@/services/queryService'
 import { ExecutionPlanPanel } from './executionPlanPanel'
-import { ResultPanel } from './resultPanel'
 
 interface SqlEditorOptions {
   sql?: string
@@ -16,12 +15,18 @@ interface SqlEditorOptions {
   uri?: Uri
 }
 
+interface SqlSuggestion {
+  value: string
+  insertText: string
+  detail: string
+  kind: SchemaObject['type'] | 'keyword'
+}
+
 interface SqlEditorState {
   connections: Array<{ id: string; name: string; driverId: string }>
   databases: string[]
   schemas: string[]
-  objects: Array<{ name: string; type: SchemaObject['type']; schema?: string }>
-  history: QueryHistoryItem[]
+  suggestions: SqlSuggestion[]
   selectedConnectionId: string
   selectedDatabase: string
   selectedSchema: string
@@ -114,14 +119,14 @@ export class SqlEditorPanel {
     }
 
     if (message.type === 'run' && typeof message.sql === 'string') {
-      this.sql = message.sql
-      await this.runSql()
+      this.sql = typeof message.editorSql === 'string' ? message.editorSql : message.sql
+      await this.runSql(message.sql)
       return
     }
 
     if (message.type === 'explain' && typeof message.sql === 'string') {
-      this.sql = message.sql
-      await this.showExecutionPlan()
+      this.sql = typeof message.editorSql === 'string' ? message.editorSql : message.sql
+      await this.showExecutionPlan(message.sql)
       return
     }
 
@@ -165,8 +170,7 @@ export class SqlEditorPanel {
       this.scope.schema = undefined
     }
 
-    const objects = await this.loadObjects(this.selectedProfile, this.scope.database, this.scope.schema)
-    const history = this.getHistory(this.selectedProfile)
+    const suggestions = await this.loadSuggestions(this.selectedProfile, this.scope.database, this.scope.schema, schemas)
 
     return {
       connections: connections.map(profile => ({
@@ -176,8 +180,7 @@ export class SqlEditorPanel {
       })),
       databases,
       schemas,
-      objects,
-      history,
+      suggestions,
       selectedConnectionId: this.selectedProfile?.id || '',
       selectedDatabase: this.scope.database || '',
       selectedSchema: this.scope.schema || '',
@@ -211,42 +214,57 @@ export class SqlEditorPanel {
     }
   }
 
-  private async loadObjects(
+  private async loadSuggestions(
     profile: DbConnectionProfile | undefined,
     database: string | undefined,
-    schema: string | undefined
-  ): Promise<Array<{ name: string; type: SchemaObject['type']; schema?: string }>> {
+    schema: string | undefined,
+    schemas: string[]
+  ): Promise<SqlSuggestion[]> {
     if (!profile) return []
+
+    const suggestions: SqlSuggestion[] = []
+    const seen = new Set<string>()
+    const addSuggestion = (value: string, kind: SqlSuggestion['kind'], detail: string, insertText = value): void => {
+      if (!value) return
+      const key = `${kind}:${value.toLowerCase()}:${detail.toLowerCase()}`
+      if (seen.has(key)) return
+      seen.add(key)
+      suggestions.push({ value, insertText, kind, detail })
+    }
+
+    schemas.forEach(schemaName => addSuggestion(schemaName, 'schema', 'schema'))
 
     try {
       const driver = this.driverRegistry.getDriver(profile.driverId)
-      const objects = await driver.listObjects(profile, { database, schema })
-      return objects
-        .filter(object => object.type !== 'database')
-        .map(object => ({
-          name: object.name,
-          type: object.type,
-          schema: object.scope?.schema || schema
-        }))
+      const metadataSchema = schema || this.getAutocompleteSchema(profile, schemas)
+      const objects = await driver.listObjects(profile, { database, schema: metadataSchema })
+
+      for (const object of objects) {
+        if (object.type === 'database') continue
+        const objectSchema = object.scope?.schema || metadataSchema
+        const detail = objectSchema && object.type !== 'schema'
+          ? `${object.type} - ${objectSchema}`
+          : object.type
+        addSuggestion(object.name, object.type, detail)
+      }
     } catch {
-      return []
+      return suggestions
     }
+
+    return suggestions
   }
 
-  private getHistory(profile: DbConnectionProfile | undefined): QueryHistoryItem[] {
-    try {
-      const history = QueryHistoryService.getInstance().getRecent(30)
-      return profile
-        ? history.filter(item => !item.connectionId || item.connectionId === profile.id)
-        : history
-    } catch {
-      return []
+  private getAutocompleteSchema(profile: DbConnectionProfile, schemas: string[]): string | undefined {
+    if (profile.driverId === 'postgresql' || profile.driverId === 'cockroachdb') {
+      return schemas.includes('public') ? 'public' : schemas[0]
     }
+
+    return undefined
   }
 
-  private async runSql(): Promise<void> {
+  private async runSql(querySql: string): Promise<void> {
     const profile = this.selectedProfile
-    if (!profile || this.sql.trim().length === 0) {
+    if (!profile || querySql.trim().length === 0) {
       window.showWarningMessage(t('query.empty'))
       return
     }
@@ -254,26 +272,26 @@ export class SqlEditorPanel {
     this.panel.webview.postMessage({ type: 'busy', value: true })
     try {
       const result = await this.queryService.run(profile, {
-        sql: this.sql,
+        sql: querySql,
         database: this.scope.database,
         schema: this.scope.schema
       })
-      ResultPanel.show(this.context, t('query.resultTitle', this.getContextLabel(profile)), result)
-      await QueryHistoryService.getInstance().add(this.sql, profile, result)
+      await QueryHistoryService.getInstance().add(querySql, profile, result)
+      this.panel.webview.postMessage({ type: 'result', result: this.toWebviewResult(result) })
       this.panel.webview.postMessage({ type: 'status', message: `${result.rowCount} rows, ${result.elapsedMs} ms` })
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
-      await QueryHistoryService.getInstance().add(this.sql, profile, error instanceof Error ? error : new Error(message))
-      window.showErrorMessage(t('query.failed', message))
+      await QueryHistoryService.getInstance().add(querySql, profile, error instanceof Error ? error : new Error(message))
+      this.panel.webview.postMessage({ type: 'resultError', message })
       this.panel.webview.postMessage({ type: 'status', message })
     } finally {
       this.panel.webview.postMessage({ type: 'busy', value: false })
     }
   }
 
-  private async showExecutionPlan(): Promise<void> {
+  private async showExecutionPlan(querySql: string): Promise<void> {
     const profile = this.selectedProfile
-    if (!profile || this.sql.trim().length === 0) {
+    if (!profile || querySql.trim().length === 0) {
       window.showWarningMessage(t('query.empty'))
       return
     }
@@ -286,8 +304,8 @@ export class SqlEditorPanel {
 
     this.panel.webview.postMessage({ type: 'busy', value: true })
     try {
-      const plan = await driver.getExecutionPlan(profile, this.sql, this.scope)
-      ExecutionPlanPanel.show(this.context, plan, this.sql)
+      const plan = await driver.getExecutionPlan(profile, querySql, this.scope)
+      ExecutionPlanPanel.show(this.context, plan, querySql)
       this.panel.webview.postMessage({ type: 'status', message: 'Execution plan opened' })
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
@@ -316,6 +334,35 @@ export class SqlEditorPanel {
     await this.postState()
   }
 
+  private toWebviewResult(result: QueryResult): QueryResult {
+    return {
+      ...result,
+      rows: result.rows.map(row => {
+        const nextRow: Record<string, unknown> = {}
+        for (const column of result.columns) {
+          nextRow[column.name] = this.formatValueForWebview(row[column.name])
+        }
+        return nextRow
+      })
+    }
+  }
+
+  private formatValueForWebview(value: unknown): unknown {
+    if (value === null) return null
+    if (value === undefined) return ''
+    if (value instanceof Date) return value.toISOString()
+    if (value instanceof Uint8Array) return `[${value.byteLength} bytes]`
+    if (typeof value === 'bigint') return value.toString()
+    if (typeof value === 'object') {
+      try {
+        return JSON.stringify(value)
+      } catch {
+        return String(value)
+      }
+    }
+    return value
+  }
+
   private getContextLabel(profile: DbConnectionProfile): string {
     return [profile.name, this.scope.database, this.scope.schema].filter(Boolean).join(' / ')
   }
@@ -338,6 +385,7 @@ export class SqlEditorPanel {
       --toolbar: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-sideBar-background));
       --muted: var(--vscode-descriptionForeground);
       --active: var(--vscode-list-activeSelectionBackground);
+      --active-foreground: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground));
       --hover: var(--vscode-list-hoverBackground);
     }
     * { box-sizing: border-box; }
@@ -391,98 +439,29 @@ export class SqlEditorPanel {
     }
     button:hover { background: var(--vscode-toolbar-hoverBackground); }
     button:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
-    .primary { color: var(--vscode-button-foreground); background: var(--vscode-button-background); border-color: var(--vscode-button-background); }
+    .primary {
+      color: var(--vscode-button-foreground);
+      background: var(--vscode-button-background);
+      border-color: var(--vscode-button-background);
+    }
     .primary:hover { background: var(--vscode-button-hoverBackground); }
-    select { min-width: 134px; max-width: 210px; padding: 0 24px 0 8px; }
+    select {
+      min-width: 134px;
+      max-width: 210px;
+      padding: 0 24px 0 8px;
+    }
     .wide-select { min-width: 188px; }
     .workbench {
       min-height: 0;
       display: grid;
-      grid-template-columns: minmax(220px, 26vw) minmax(0, 1fr);
+      grid-template-rows: minmax(0, 1fr);
       overflow: hidden;
     }
-    .sidebar {
-      min-width: 0;
-      display: grid;
-      grid-template-rows: auto auto minmax(0, 1fr);
-      border-right: 1px solid var(--border);
-      background: var(--vscode-sideBar-background);
-    }
-    .tabs {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      border-bottom: 1px solid var(--border);
-    }
-    .tab {
-      height: 32px;
-      border: 0;
-      border-right: 1px solid var(--border);
-      border-radius: 0;
-      background: transparent;
-      color: var(--vscode-foreground);
-    }
-    .tab:last-child { border-right: 0; }
-    .tab.active {
-      background: var(--vscode-tab-activeBackground, var(--vscode-editor-background));
-      border-bottom: 2px solid var(--vscode-focusBorder);
-    }
-    .side-search {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 6px;
-      padding: 8px;
-      border-bottom: 1px solid var(--border);
-    }
-    .side-search input {
-      width: 100%;
-      min-width: 0;
-      padding: 0 8px;
-      color: var(--vscode-input-foreground);
-      background: var(--vscode-input-background);
-      border-color: var(--vscode-input-border, var(--border));
-    }
-    .side-panel {
-      min-height: 0;
-      overflow: auto;
-      padding: 6px;
-    }
-    .side-panel.hidden { display: none; }
-    .object-row, .history-row {
-      display: grid;
-      gap: 2px;
-      width: 100%;
-      padding: 6px 7px;
-      border-radius: 4px;
-      cursor: pointer;
-      user-select: none;
-    }
-    .object-row:hover, .history-row:hover { background: var(--hover); }
-    .object-main, .history-main {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      min-width: 0;
-    }
-    .object-name, .history-sql {
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      font-family: var(--vscode-editor-font-family);
-    }
-    .object-type, .history-meta {
-      color: var(--muted);
-      font-size: 11px;
-      white-space: nowrap;
-    }
-    .history-error { color: var(--vscode-errorForeground); }
-    .empty-state {
-      padding: 12px 8px;
-      color: var(--muted);
-      font-size: 12px;
+    .workbench.has-result {
+      grid-template-rows: minmax(132px, 1fr) minmax(112px, 36vh);
     }
     .editor-area {
+      position: relative;
       min-width: 0;
       min-height: 0;
       display: grid;
@@ -527,6 +506,51 @@ export class SqlEditorPanel {
       white-space: pre;
       overflow: auto;
     }
+    .suggestions {
+      position: absolute;
+      z-index: 20;
+      min-width: 168px;
+      max-width: min(420px, calc(100% - 68px));
+      max-height: 180px;
+      overflow: auto;
+      border: 1px solid var(--vscode-widget-border, var(--border));
+      color: var(--vscode-quickInput-foreground, var(--vscode-foreground));
+      background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background, var(--vscode-editor-background)));
+      box-shadow: 0 6px 18px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.3));
+    }
+    .suggestions.hidden,
+    .results-panel.hidden {
+      display: none;
+    }
+    .suggestion {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 12px;
+      padding: 5px 8px;
+      cursor: pointer;
+    }
+    .suggestion:hover { background: var(--hover); }
+    .suggestion.active {
+      color: var(--active-foreground);
+      background: var(--active);
+    }
+    .suggestion-value {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: var(--vscode-editor-font-family);
+    }
+    .suggestion-detail {
+      color: var(--muted);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .suggestion.active .suggestion-detail {
+      color: inherit;
+      opacity: 0.8;
+    }
     .snippet-bar {
       display: flex;
       align-items: center;
@@ -538,6 +562,70 @@ export class SqlEditorPanel {
     }
     .snippet-bar button { height: 26px; font-size: 12px; }
     .spacer { flex: 1; min-width: 12px; }
+    #contextLabel {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .results-panel {
+      min-height: 0;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      border-top: 1px solid var(--border);
+      background: var(--vscode-editor-background);
+      overflow: hidden;
+    }
+    .results-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 32px;
+      padding: 4px 8px;
+      border-bottom: 1px solid var(--border);
+      background: var(--toolbar);
+    }
+    .results-header strong {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .results-wrap {
+      min-height: 0;
+      overflow: auto;
+    }
+    table {
+      width: max-content;
+      min-width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    th, td {
+      max-width: 360px;
+      border: 1px solid var(--border);
+      padding: 5px 7px;
+      text-align: left;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-editor-background));
+    }
+    tbody tr:hover { background: var(--hover); }
+    .result-empty,
+    .result-error {
+      padding: 12px;
+      color: var(--muted);
+      white-space: pre-wrap;
+    }
+    .result-error { color: var(--vscode-errorForeground); }
     .status {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
@@ -556,9 +644,13 @@ export class SqlEditorPanel {
       text-overflow: ellipsis;
     }
     @media (max-width: 720px) {
-      .workbench { grid-template-columns: 1fr; grid-template-rows: minmax(150px, 32vh) minmax(0, 1fr); }
-      .sidebar { border-right: 0; border-bottom: 1px solid var(--border); }
-      select { min-width: 112px; }
+      .toolbar { align-content: start; }
+      select { min-width: 112px; max-width: 160px; }
+      .wide-select { min-width: 150px; }
+      .workbench.has-result {
+        grid-template-rows: minmax(120px, 1fr) minmax(104px, 34vh);
+      }
+      th, td { max-width: 240px; }
     }
   </style>
   <title>DB Nexus SQL</title>
@@ -573,6 +665,7 @@ export class SqlEditorPanel {
       <select id="connectionSelect" class="wide-select" title="Connection"></select>
       <select id="databaseSelect" title="Database"></select>
       <select id="schemaSelect" title="Schema"></select>
+      <button id="refreshButton" title="Refresh metadata">Refresh</button>
     </div>
     <div class="toolbar-group">
       <button id="runButton" class="primary" title="Run selected SQL or whole editor (Ctrl+Enter)">Run</button>
@@ -587,24 +680,13 @@ export class SqlEditorPanel {
       <button id="askAiButton" title="Ask AI">Ask AI</button>
     </div>
   </div>
-  <div class="workbench">
-    <aside class="sidebar">
-      <div class="tabs">
-        <button class="tab active" id="objectsTab">Objects</button>
-        <button class="tab" id="historyTab">History</button>
-      </div>
-      <div class="side-search">
-        <input id="sideFilter" type="search" placeholder="Filter objects or history">
-        <button id="refreshButton" title="Refresh metadata">Refresh</button>
-      </div>
-      <div class="side-panel" id="objectsPanel"></div>
-      <div class="side-panel hidden" id="historyPanel"></div>
-    </aside>
-    <main class="editor-area">
+  <div class="workbench" id="workbench">
+    <main class="editor-area" id="editorArea">
       <div class="editor-shell">
         <div class="gutter" id="gutter"></div>
         <textarea id="editor" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
       </div>
+      <div class="suggestions hidden" id="suggestions"></div>
       <div class="snippet-bar">
         <button data-snippet="select">SELECT</button>
         <button data-snippet="insert">INSERT</button>
@@ -615,18 +697,30 @@ export class SqlEditorPanel {
         <span id="contextLabel"></span>
       </div>
     </main>
+    <section class="results-panel hidden" id="resultPanel">
+      <div class="results-header">
+        <strong id="resultSummary">Results</strong>
+        <div class="spacer"></div>
+        <button id="closeResultButton" title="Hide results">Close</button>
+      </div>
+      <div class="results-wrap" id="resultBody"></div>
+    </section>
   </div>
   <div class="status"><span id="status">Ready</span><span id="cursorStatus">Ln 1, Col 1</span></div>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
+    const workbench = document.getElementById('workbench');
+    const editorArea = document.getElementById('editorArea');
     const editor = document.getElementById('editor');
     const gutter = document.getElementById('gutter');
+    const suggestions = document.getElementById('suggestions');
     const status = document.getElementById('status');
     const cursorStatus = document.getElementById('cursorStatus');
     const contextLabel = document.getElementById('contextLabel');
     const connectionSelect = document.getElementById('connectionSelect');
     const databaseSelect = document.getElementById('databaseSelect');
     const schemaSelect = document.getElementById('schemaSelect');
+    const refreshButton = document.getElementById('refreshButton');
     const runButton = document.getElementById('runButton');
     const runSelectionButton = document.getElementById('runSelectionButton');
     const stopButton = document.getElementById('stopButton');
@@ -637,22 +731,27 @@ export class SqlEditorPanel {
     const commentButton = document.getElementById('commentButton');
     const clearButton = document.getElementById('clearButton');
     const askAiButton = document.getElementById('askAiButton');
-    const refreshButton = document.getElementById('refreshButton');
-    const objectsTab = document.getElementById('objectsTab');
-    const historyTab = document.getElementById('historyTab');
-    const objectsPanel = document.getElementById('objectsPanel');
-    const historyPanel = document.getElementById('historyPanel');
-    const sideFilter = document.getElementById('sideFilter');
+    const resultPanel = document.getElementById('resultPanel');
+    const resultSummary = document.getElementById('resultSummary');
+    const resultBody = document.getElementById('resultBody');
+    const closeResultButton = document.getElementById('closeResultButton');
+    const sqlKeywords = [
+      'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP', 'FROM', 'WHERE',
+      'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 'ON', 'GROUP', 'ORDER', 'BY', 'HAVING',
+      'LIMIT', 'OFFSET', 'VALUES', 'SET', 'INTO', 'AND', 'OR', 'NOT', 'NULL', 'IS',
+      'DISTINCT', 'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END'
+    ];
     let initialized = false;
     let currentState = {
-      objects: [],
-      history: [],
+      suggestions: [],
       dialect: 'sql',
       selectedDatabase: '',
       selectedSchema: '',
       contextLabel: ''
     };
-    let activeSidePanel = 'objects';
+    let allSuggestions = [];
+    let visibleSuggestions = [];
+    let activeSuggestionIndex = 0;
 
     function setOptions(select, values, selectedValue, emptyLabel) {
       select.innerHTML = '';
@@ -668,7 +767,7 @@ export class SqlEditorPanel {
     }
 
     function escapeHtml(value) {
-      return String(value || '')
+      return String(value == null ? '' : value)
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
@@ -711,27 +810,134 @@ export class SqlEditorPanel {
       editor.focus();
       updateGutter();
       updateCursorStatus();
+      updateSuggestions();
     }
 
-    function quoteIdentifier(value) {
-      const text = String(value || '');
-      if (currentState.dialect === 'mysql' || currentState.dialect === 'mariadb' || currentState.dialect === 'clickhouse') {
-        const tick = String.fromCharCode(96);
-        return tick + text.replace(new RegExp(tick, 'g'), tick + tick) + tick;
-      }
-      return '"' + text.replace(/"/g, '""') + '"';
+    function buildSuggestions(state) {
+      const combined = [];
+      const seen = new Set();
+      const add = item => {
+        const value = String(item.value || '').trim();
+        if (!value) return;
+        const key = value.toLowerCase() + ':' + String(item.detail || item.kind || '').toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        combined.push({
+          value,
+          insertText: String(item.insertText || value),
+          detail: String(item.detail || item.kind || ''),
+          kind: String(item.kind || '')
+        });
+      };
+
+      sqlKeywords.forEach(keyword => add({ value: keyword, insertText: keyword, detail: 'keyword', kind: 'keyword' }));
+      (state.suggestions || []).forEach(add);
+      return combined;
     }
 
-    function qualifiedName(object) {
-      const parts = [];
-      if (currentState.dialect === 'mysql' || currentState.dialect === 'mariadb' || currentState.dialect === 'clickhouse') {
-        if (currentState.selectedDatabase) parts.push(currentState.selectedDatabase);
-      } else if (currentState.dialect !== 'sqlite') {
-        const schema = object.schema || currentState.selectedSchema;
-        if (schema) parts.push(schema);
+    function getCurrentWordRange() {
+      const position = editor.selectionStart;
+      const text = editor.value;
+      let start = position;
+      let end = position;
+
+      while (start > 0 && /[A-Za-z0-9_$]/.test(text.charAt(start - 1))) {
+        start--;
       }
-      parts.push(object.name || 'table_name');
-      return parts.map(quoteIdentifier).join('.');
+      while (end < text.length && /[A-Za-z0-9_$]/.test(text.charAt(end))) {
+        end++;
+      }
+
+      return {
+        start,
+        end,
+        prefix: text.slice(start, position)
+      };
+    }
+
+    function hideSuggestions() {
+      suggestions.classList.add('hidden');
+      visibleSuggestions = [];
+      activeSuggestionIndex = 0;
+    }
+
+    function renderSuggestions() {
+      suggestions.innerHTML = visibleSuggestions.map((item, index) => {
+        return '<div class="suggestion' + (index === activeSuggestionIndex ? ' active' : '') + '" data-index="' + index + '">' +
+          '<span class="suggestion-value">' + escapeHtml(item.value) + '</span>' +
+          '<span class="suggestion-detail">' + escapeHtml(item.detail) + '</span>' +
+        '</div>';
+      }).join('');
+      positionSuggestions();
+    }
+
+    function positionSuggestions() {
+      const range = getCurrentWordRange();
+      const before = editor.value.slice(0, range.start);
+      const lines = before.split('\\n');
+      const lineIndex = lines.length - 1;
+      const column = lines[lines.length - 1].length;
+      const style = window.getComputedStyle(editor);
+      const fontSize = parseFloat(style.fontSize) || 13;
+      const lineHeight = parseFloat(style.lineHeight) || 20;
+      const paddingLeft = parseFloat(style.paddingLeft) || 14;
+      const paddingTop = parseFloat(style.paddingTop) || 12;
+      const charWidth = Math.max(7, fontSize * 0.62);
+      const minLeft = 56;
+      const maxLeft = Math.max(minLeft, editorArea.clientWidth - 188);
+      const maxTop = Math.max(8, editorArea.clientHeight - suggestions.offsetHeight - 42);
+      const left = minLeft + paddingLeft + column * charWidth - editor.scrollLeft;
+      const top = paddingTop + (lineIndex + 1) * lineHeight - editor.scrollTop;
+
+      suggestions.style.left = Math.max(minLeft, Math.min(left, maxLeft)) + 'px';
+      suggestions.style.top = Math.max(8, Math.min(top, maxTop)) + 'px';
+    }
+
+    function updateSuggestions() {
+      if (editor.selectionStart !== editor.selectionEnd) {
+        hideSuggestions();
+        return;
+      }
+
+      const range = getCurrentWordRange();
+      const prefix = range.prefix.trim();
+      if (prefix.length === 0) {
+        hideSuggestions();
+        return;
+      }
+
+      const lower = prefix.toLowerCase();
+      visibleSuggestions = allSuggestions
+        .filter(item => item.value.toLowerCase().includes(lower) && item.value.toLowerCase() !== lower)
+        .sort((a, b) => {
+          const aStarts = a.value.toLowerCase().startsWith(lower) ? 0 : 1;
+          const bStarts = b.value.toLowerCase().startsWith(lower) ? 0 : 1;
+          if (aStarts !== bStarts) return aStarts - bStarts;
+          return a.value.localeCompare(b.value);
+        })
+        .slice(0, 8);
+
+      if (visibleSuggestions.length === 0) {
+        hideSuggestions();
+        return;
+      }
+
+      activeSuggestionIndex = 0;
+      suggestions.classList.remove('hidden');
+      renderSuggestions();
+    }
+
+    function acceptSuggestion(index) {
+      const item = visibleSuggestions[index];
+      if (!item) return false;
+      const range = getCurrentWordRange();
+      editor.value = editor.value.slice(0, range.start) + item.insertText + editor.value.slice(range.end);
+      editor.selectionStart = editor.selectionEnd = range.start + item.insertText.length;
+      hideSuggestions();
+      editor.focus();
+      updateGutter();
+      updateCursorStatus();
+      return true;
     }
 
     function formatSql(sql) {
@@ -744,12 +950,14 @@ export class SqlEditorPanel {
     }
 
     function currentTableName() {
-      const firstTable = currentState.objects.find(item => item.type === 'table' || item.type === 'view' || item.type === 'materializedView');
-      return firstTable ? qualifiedName(firstTable) : 'table_name';
+      const firstTable = currentState.suggestions.find(item => {
+        return item.kind === 'table' || item.kind === 'view' || item.kind === 'materializedView';
+      });
+      return firstTable ? firstTable.insertText : 'table_name';
     }
 
-    function snippet(kind, object) {
-      const table = object ? qualifiedName(object) : currentTableName();
+    function snippet(kind) {
+      const table = currentTableName();
       if (kind === 'insert') return 'INSERT INTO ' + table + ' (\\n  column_name\\n) VALUES (\\n  value\\n);';
       if (kind === 'update') return 'UPDATE ' + table + '\\nSET\\n  column_name = value\\nWHERE\\n  id = value;';
       if (kind === 'delete') return 'DELETE FROM ' + table + '\\nWHERE\\n  id = value;';
@@ -778,52 +986,63 @@ export class SqlEditorPanel {
       editor.selectionEnd = lineStart + nextBlock.length;
       updateGutter();
       updateCursorStatus();
+      updateSuggestions();
     }
 
-    function setSidePanel(panel) {
-      activeSidePanel = panel;
-      objectsTab.classList.toggle('active', panel === 'objects');
-      historyTab.classList.toggle('active', panel === 'history');
-      objectsPanel.classList.toggle('hidden', panel !== 'objects');
-      historyPanel.classList.toggle('hidden', panel !== 'history');
-      renderSidePanels();
+    function getDisplayColumnName(name) {
+      return String(name || '').trim() === '?column?' ? '' : String(name || '');
     }
 
-    function renderSidePanels() {
-      const filter = sideFilter.value.trim().toLowerCase();
-      const objects = currentState.objects.filter(item => {
-        return !filter || item.name.toLowerCase().includes(filter) || item.type.toLowerCase().includes(filter);
-      });
-      objectsPanel.innerHTML = objects.length
-        ? objects.map(item => {
-            return '<div class="object-row" data-name="' + escapeHtml(item.name) + '" data-type="' + escapeHtml(item.type) + '" data-schema="' + escapeHtml(item.schema || '') + '">' +
-              '<div class="object-main"><span class="object-name">' + escapeHtml(item.name) + '</span><span class="object-type">' + escapeHtml(item.type) + '</span></div>' +
-              (item.schema ? '<div class="object-type">' + escapeHtml(item.schema) + '</div>' : '') +
-            '</div>';
-          }).join('')
-        : '<div class="empty-state">' + (currentState.selectedSchema ? 'No objects in this schema' : 'Select a schema or database object') + '</div>';
-
-      const history = currentState.history.filter(item => {
-        const haystack = (item.sql + ' ' + (item.connectionName || '') + ' ' + (item.error || '')).toLowerCase();
-        return !filter || haystack.includes(filter);
-      });
-      historyPanel.innerHTML = history.length
-        ? history.map(item => {
-            const sql = item.sql.replace(/\\s+/g, ' ').trim();
-            const meta = new Date(item.timestamp).toLocaleString() + (item.success ? ' | ' + (item.rowCount || 0) + ' rows' : ' | failed');
-            return '<div class="history-row" data-id="' + escapeHtml(item.id) + '">' +
-              '<div class="history-main"><span class="history-sql">' + escapeHtml(sql) + '</span></div>' +
-              '<div class="history-meta' + (item.success ? '' : ' history-error') + '">' + escapeHtml(meta) + '</div>' +
-            '</div>';
-          }).join('')
-        : '<div class="empty-state">No query history</div>';
+    function formatValue(value) {
+      if (value === null) return 'NULL';
+      if (value === undefined) return '';
+      if (typeof value === 'object') return JSON.stringify(value);
+      return String(value);
     }
 
-    function closestFromEvent(event, selector) {
-      const target = event.target;
-      if (!target) return null;
-      if (target.closest) return target.closest(selector);
-      return target.parentElement ? target.parentElement.closest(selector) : null;
+    function renderResult(result) {
+      workbench.classList.add('has-result');
+      resultPanel.classList.remove('hidden');
+      resultSummary.textContent = (result.rowCount || 0) + ' rows, ' + (result.elapsedMs || 0) + ' ms';
+
+      const columns = result.columns || [];
+      if (columns.length === 0) {
+        resultBody.innerHTML = '<div class="result-empty">Done</div>';
+        return;
+      }
+
+      const showHeaders = columns.some(column => getDisplayColumnName(column.name) !== '');
+      const headers = showHeaders
+        ? '<thead><tr>' + columns.map(column => '<th>' + escapeHtml(getDisplayColumnName(column.name)) + '</th>').join('') + '</tr></thead>'
+        : '';
+      const rows = (result.rows || []).map(row => {
+        const cells = columns.map(column => {
+          return '<td title="' + escapeHtml(formatValue(row[column.name])) + '">' + escapeHtml(formatValue(row[column.name])) + '</td>';
+        }).join('');
+        return '<tr>' + cells + '</tr>';
+      }).join('');
+
+      resultBody.innerHTML = '<table>' + headers + '<tbody>' + rows + '</tbody></table>';
+    }
+
+    function renderResultError(message) {
+      workbench.classList.add('has-result');
+      resultPanel.classList.remove('hidden');
+      resultSummary.textContent = 'Error';
+      resultBody.innerHTML = '<div class="result-error">' + escapeHtml(message || 'Query failed') + '</div>';
+    }
+
+    function hideResult() {
+      workbench.classList.remove('has-result');
+      resultPanel.classList.add('hidden');
+    }
+
+    function postRun(sql) {
+      vscode.postMessage({ type: 'run', sql, editorSql: editor.value });
+    }
+
+    function postExplain(sql) {
+      vscode.postMessage({ type: 'explain', sql, editorSql: editor.value });
     }
 
     window.addEventListener('message', event => {
@@ -831,6 +1050,7 @@ export class SqlEditorPanel {
       if (message.type === 'state') {
         const state = message.state;
         currentState = state;
+        allSuggestions = buildSuggestions(state);
         setOptions(connectionSelect, state.connections.map(item => ({ label: item.name + ' (' + item.driverId + ')', value: item.id })), state.selectedConnectionId);
         setOptions(databaseSelect, state.databases, state.selectedDatabase, 'Database');
         setOptions(schemaSelect, state.schemas, state.selectedSchema, 'Default schema');
@@ -841,29 +1061,72 @@ export class SqlEditorPanel {
         }
         updateGutter();
         updateCursorStatus();
-        renderSidePanels();
+        updateSuggestions();
       }
       if (message.type === 'busy') {
-        runButton.disabled = Boolean(message.value);
-        runSelectionButton.disabled = Boolean(message.value);
-        explainButton.disabled = Boolean(message.value);
-        saveButton.disabled = Boolean(message.value);
+        const busy = Boolean(message.value);
+        runButton.disabled = busy;
+        runSelectionButton.disabled = busy;
+        explainButton.disabled = busy;
+        saveButton.disabled = busy;
         stopButton.disabled = true;
+        if (busy) {
+          status.textContent = 'Running...';
+        }
       }
       if (message.type === 'status') {
         status.textContent = message.message || 'Ready';
       }
+      if (message.type === 'result') {
+        renderResult(message.result || {});
+      }
+      if (message.type === 'resultError') {
+        renderResultError(message.message);
+      }
     });
 
-    editor.addEventListener('input', () => { updateGutter(); updateCursorStatus(); });
-    editor.addEventListener('keyup', updateCursorStatus);
-    editor.addEventListener('click', updateCursorStatus);
-    editor.addEventListener('select', updateCursorStatus);
-    editor.addEventListener('scroll', () => { gutter.scrollTop = editor.scrollTop; });
+    editor.addEventListener('input', () => { updateGutter(); updateCursorStatus(); updateSuggestions(); });
+    editor.addEventListener('keyup', event => {
+      updateCursorStatus();
+      if (!['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(event.key)) {
+        updateSuggestions();
+      }
+    });
+    editor.addEventListener('click', () => { updateCursorStatus(); updateSuggestions(); });
+    editor.addEventListener('select', () => { updateCursorStatus(); updateSuggestions(); });
+    editor.addEventListener('scroll', () => {
+      gutter.scrollTop = editor.scrollTop;
+      if (!suggestions.classList.contains('hidden')) positionSuggestions();
+    });
     editor.addEventListener('keydown', event => {
+      if (!suggestions.classList.contains('hidden')) {
+        if (event.key === 'ArrowDown') {
+          event.preventDefault();
+          activeSuggestionIndex = Math.min(visibleSuggestions.length - 1, activeSuggestionIndex + 1);
+          renderSuggestions();
+          return;
+        }
+        if (event.key === 'ArrowUp') {
+          event.preventDefault();
+          activeSuggestionIndex = Math.max(0, activeSuggestionIndex - 1);
+          renderSuggestions();
+          return;
+        }
+        if ((event.key === 'Enter' && !event.ctrlKey && !event.metaKey) || event.key === 'Tab') {
+          event.preventDefault();
+          acceptSuggestion(activeSuggestionIndex);
+          return;
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          hideSuggestions();
+          return;
+        }
+      }
+
       if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
         event.preventDefault();
-        vscode.postMessage({ type: 'run', sql: getSelectedSql() });
+        postRun(getSelectedSql());
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
         event.preventDefault();
@@ -874,6 +1137,7 @@ export class SqlEditorPanel {
         editor.value = formatSql(editor.value);
         updateGutter();
         updateCursorStatus();
+        updateSuggestions();
       }
       if ((event.ctrlKey || event.metaKey) && event.key === '/') {
         event.preventDefault();
@@ -887,14 +1151,16 @@ export class SqlEditorPanel {
         editor.selectionStart = editor.selectionEnd = start + 2;
         updateGutter();
         updateCursorStatus();
+        updateSuggestions();
       }
     });
     connectionSelect.addEventListener('change', () => vscode.postMessage({ type: 'selectConnection', connectionId: connectionSelect.value }));
     databaseSelect.addEventListener('change', () => vscode.postMessage({ type: 'selectDatabase', database: databaseSelect.value }));
     schemaSelect.addEventListener('change', () => vscode.postMessage({ type: 'selectSchema', schema: schemaSelect.value }));
-    runButton.addEventListener('click', () => vscode.postMessage({ type: 'run', sql: getSelectedSql() }));
-    runSelectionButton.addEventListener('click', () => vscode.postMessage({ type: 'run', sql: getSelectedSql() }));
-    explainButton.addEventListener('click', () => vscode.postMessage({ type: 'explain', sql: getSelectedSql() }));
+    refreshButton.addEventListener('click', () => vscode.postMessage({ type: 'refreshMetadata' }));
+    runButton.addEventListener('click', () => postRun(getSelectedSql()));
+    runSelectionButton.addEventListener('click', () => postRun(getSelectedSql()));
+    explainButton.addEventListener('click', () => postExplain(getSelectedSql()));
     saveButton.addEventListener('click', () => vscode.postMessage({ type: 'save', sql: editor.value }));
     copyButton.addEventListener('click', () => {
       navigator.clipboard.writeText(editor.value).then(() => {
@@ -903,40 +1169,38 @@ export class SqlEditorPanel {
         status.textContent = 'Copy failed';
       });
     });
-    formatButton.addEventListener('click', () => { editor.value = formatSql(editor.value); updateGutter(); updateCursorStatus(); });
-    commentButton.addEventListener('click', toggleComment);
-    clearButton.addEventListener('click', () => { editor.value = ''; updateGutter(); updateCursorStatus(); editor.focus(); });
-    askAiButton.addEventListener('click', () => vscode.postMessage({ type: 'askAi', sql: editor.value }));
-    refreshButton.addEventListener('click', () => vscode.postMessage({ type: 'refreshMetadata' }));
-    objectsTab.addEventListener('click', () => setSidePanel('objects'));
-    historyTab.addEventListener('click', () => setSidePanel('history'));
-    sideFilter.addEventListener('input', renderSidePanels);
-    document.querySelectorAll('[data-snippet]').forEach(button => {
-      button.addEventListener('click', () => replaceSelection(snippet(button.dataset.snippet)));
-    });
-    objectsPanel.addEventListener('click', event => {
-      const row = closestFromEvent(event, '.object-row');
-      if (!row) return;
-      const object = {
-        name: row.dataset.name,
-        type: row.dataset.type,
-        schema: row.dataset.schema || currentState.selectedSchema
-      };
-      if (object.type === 'schema') {
-        vscode.postMessage({ type: 'selectSchema', schema: object.name });
-        return;
-      }
-      replaceSelection(qualifiedName(object));
-    });
-    historyPanel.addEventListener('click', event => {
-      const row = closestFromEvent(event, '.history-row');
-      if (!row) return;
-      const item = currentState.history.find(entry => entry.id === row.dataset.id);
-      if (!item) return;
-      editor.value = item.sql;
-      editor.focus();
+    formatButton.addEventListener('click', () => {
+      editor.value = formatSql(editor.value);
       updateGutter();
       updateCursorStatus();
+      updateSuggestions();
+    });
+    commentButton.addEventListener('click', toggleComment);
+    clearButton.addEventListener('click', () => {
+      editor.value = '';
+      updateGutter();
+      updateCursorStatus();
+      hideSuggestions();
+      editor.focus();
+    });
+    askAiButton.addEventListener('click', () => vscode.postMessage({ type: 'askAi', sql: editor.value }));
+    closeResultButton.addEventListener('click', hideResult);
+    suggestions.addEventListener('mousedown', event => {
+      const row = event.target && event.target.closest ? event.target.closest('.suggestion') : null;
+      if (!row) return;
+      event.preventDefault();
+      acceptSuggestion(Number(row.dataset.index || 0));
+    });
+    document.addEventListener('mousedown', event => {
+      if (event.target !== editor && !suggestions.contains(event.target)) {
+        hideSuggestions();
+      }
+    });
+    window.addEventListener('resize', () => {
+      if (!suggestions.classList.contains('hidden')) positionSuggestions();
+    });
+    document.querySelectorAll('[data-snippet]').forEach(button => {
+      button.addEventListener('click', () => replaceSelection(snippet(button.dataset.snippet)));
     });
     vscode.postMessage({ type: 'ready' });
   </script>

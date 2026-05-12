@@ -2,7 +2,7 @@ import { ExtensionContext, ProgressLocation, TreeItemCollapsibleState, Uri, comm
 import { buildConnectionUrl, parseConnectionUrl } from '@/core/connectionUrl'
 import { ConnectionStore } from '@/core/connectionStore'
 import { SUPPORTED_DRIVERS } from '@/core/constants'
-import { ConnectionTestResult, DatabaseDriverId, DbConnectionProfile, SchemaObject, SchemaScope, TableSchema } from '@/core/types'
+import { ConnectionTestResult, DatabaseDriverId, DbConnectionProfile, SchemaObject, SchemaScope, TableColumn, TableDesignDraft, TableIndex, TableSchema } from '@/core/types'
 import { DriverRegistry } from '@/drivers/registry'
 import { getCurrentLanguage, initI18n, reloadI18n, t } from '@/i18n'
 import { ConnectionNode, ConnectionsTreeProvider, FieldNode, IndexNode, QueryFileNode, SchemaNode, TableDetailGroupNode, TablesGroupNode } from '@/providers/connectionsTree'
@@ -45,6 +45,16 @@ type FieldTarget = {
   tableName: string
   columnName: string
   columnType: string
+}
+
+type TableDesignSaveRequest = {
+  profile: DbConnectionProfile
+  scope: SchemaScope
+  tableName: string
+  objectType: SchemaObject['type']
+  originalSchema: TableSchema
+  draft: TableDesignDraft
+  mode: 'design' | 'create'
 }
 
 type TableSchemaTab = 'fields' | 'indexes' | 'foreignKeys' | 'checks' | 'triggers' | 'options' | 'comment' | 'sql'
@@ -437,10 +447,10 @@ export async function activate(context: ExtensionContext): Promise<void> {
         objectType: node.schemaObject.type
       })
     } else {
-      const objects = await connectionService.listObjects(dbContext.profile, dbContext.scope)
-      targets.push(...objects.filter(isTableLikeObject).map(object => ({
+      const tables = await listTablesForScope(dbContext.profile, dbContext.scope)
+      targets.push(...tables.map(object => ({
         profile: dbContext.profile,
-        scope: dbContext.scope,
+        scope: object.scope || dbContext.scope,
         tableName: object.name,
         objectType: object.type
       })))
@@ -724,8 +734,21 @@ export async function activate(context: ExtensionContext): Promise<void> {
     window.showInformationMessage(t('connection.urlCopied'))
   }
 
+  const revealConnectionInTree = async (profile: DbConnectionProfile): Promise<void> => {
+    connectionsTreeProvider?.refresh()
+    try {
+      await connectionsTreeView?.reveal(
+        new ConnectionNode(profile, TreeItemCollapsibleState.Expanded),
+        { focus: true, select: true, expand: true }
+      )
+    } catch {
+      await commands.executeCommand('dbNexus.refreshConnections')
+    }
+  }
+
   const connectConnection = async (
-    target?: ConnectionNode | DbConnectionProfile | string
+    target?: ConnectionNode | DbConnectionProfile | string,
+    options: { reveal?: boolean } = {}
   ): Promise<boolean> => {
     const profile = await resolveConnectionProfile(target)
     if (!profile) return false
@@ -744,7 +767,11 @@ export async function activate(context: ExtensionContext): Promise<void> {
         const result = await connectionService.testConnection(profile)
         if (result.ok) {
           connectionStatusManager.setStatus(profile.id, 'connected', result.latencyMs)
-          connectionsTreeProvider?.refresh()
+          if (options.reveal === false) {
+            connectionsTreeProvider?.refresh()
+          } else {
+            await revealConnectionInTree(profile)
+          }
           window.showInformationMessage(t('connection.connected', profile.name))
           return true
         }
@@ -786,19 +813,11 @@ export async function activate(context: ExtensionContext): Promise<void> {
     if (!profile) return
 
     if (!connectionStatusManager.isConnected(profile.id)) {
-      const connected = await connectConnection(profile)
+      const connected = await connectConnection(profile, { reveal: false })
       if (!connected) return
     }
 
-    connectionsTreeProvider?.refresh()
-    try {
-      await connectionsTreeView?.reveal(
-        new ConnectionNode(profile, TreeItemCollapsibleState.Expanded),
-        { focus: true, select: true, expand: true }
-      )
-    } catch {
-      await commands.executeCommand('dbNexus.refreshConnections')
-    }
+    await revealConnectionInTree(profile)
   }
 
   context.subscriptions.push(
@@ -987,37 +1006,59 @@ export async function activate(context: ExtensionContext): Promise<void> {
       })
       if (!tableName) return
 
-      const sql = buildCreateTableSql(dbContext.profile.driverId, dbContext.scope, tableName)
-      const mode = await window.showQuickPick(
-        [
-          { label: t('table.runNow'), value: 'run' as const },
-          { label: t('table.openSqlToReview'), value: 'open' as const }
-        ],
-        { placeHolder: t('table.addColumnMode') }
-      )
-      if (!mode) return
-
-      if (mode.value === 'open') {
-        await openSqlDocument(sql, dbContext)
-        return
-      }
-
-      try {
-        await executeSql(dbContext.profile, sql, dbContext.scope)
-        connectionsTreeProvider?.refresh()
-        await showTableSchemaForTarget({
-          profile: dbContext.profile,
-          scope: dbContext.scope,
-          tableName,
-          objectType: 'table'
-        })
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error)
-        window.showErrorMessage(t('table.createTableFailed', message))
-      }
+      const schema = buildNewTableDesignSchema(dbContext.profile.driverId, tableName)
+      TableSchemaPanel.show(context, t('table.schemaTitle', schema.name), schema, {
+        profile: dbContext.profile,
+        scope: dbContext.scope,
+        objectType: 'table',
+        initialTab: 'fields',
+        mode: 'create',
+        loadedAt: new Date().toISOString()
+      })
     }),
     commands.registerCommand('dbNexus.designTable', async (node: SchemaNode | undefined) => {
       await commands.executeCommand('dbNexus.showTableSchema', node)
+    }),
+    commands.registerCommand('dbNexus.saveTableDesign', async (request: TableDesignSaveRequest): Promise<TableSchema | undefined> => {
+      if (!request || request.objectType !== 'table') {
+        window.showWarningMessage(t('table.selectTable'))
+        return undefined
+      }
+
+      const driver = driverRegistry.getDriver(request.profile.driverId)
+      if (!driver?.getTableSchema) {
+        window.showErrorMessage(t('table.schemaNotSupported'))
+        return undefined
+      }
+
+      try {
+        const sqlStatements = request.mode === 'create'
+          ? buildCreateTableDesignSql(request.profile.driverId, request.scope, request.draft)
+          : buildAlterTableDesignSql(request.profile.driverId, request.scope, request.originalSchema, request.draft)
+
+        if (sqlStatements.length === 0) {
+          window.showInformationMessage(t('table.noPendingChanges'))
+          return request.originalSchema
+        }
+
+        await window.withProgress(
+          { location: ProgressLocation.Notification, title: t('table.savingDesign') },
+          async () => {
+            for (const sql of sqlStatements) {
+              await executeSql(request.profile, sql, request.scope)
+            }
+          }
+        )
+
+        connectionsTreeProvider?.refresh()
+        const nextSchema = await driver.getTableSchema!(request.profile, request.draft.tableName, request.scope)
+        window.showInformationMessage(t(request.mode === 'create' ? 'table.created' : 'table.designSaved', request.draft.tableName))
+        return nextSchema
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error)
+        window.showErrorMessage(t(request.mode === 'create' ? 'table.createTableFailed' : 'table.saveDesignFailed', message))
+        return undefined
+      }
     }),
     commands.registerCommand('dbNexus.addColumn', async (node: SchemaNode | TableDetailGroupNode | TableTarget | undefined) => {
       const target = await resolveTableTarget(node)
@@ -1028,69 +1069,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
         return
       }
 
-      const columnName = await window.showInputBox({
-        prompt: t('table.addColumnName'),
-        placeHolder: 'status'
-      })
-      if (!columnName) return
-
-      const columnType = await window.showInputBox({
-        prompt: t('table.addColumnType'),
-        value: 'VARCHAR(255)'
-      })
-      if (!columnType) return
-
-      const nullableChoice = await window.showQuickPick(
-        [
-          { label: t('table.nullableYes'), nullable: true },
-          { label: t('table.nullableNo'), nullable: false }
-        ],
-        { placeHolder: t('table.addColumnNullable') }
-      )
-      if (!nullableChoice) return
-
-      const defaultValue = await window.showInputBox({
-        prompt: t('table.addColumnDefault'),
-        placeHolder: t('table.defaultExpressionPlaceholder')
-      })
-
-      const qualifiedName = getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)
-      const sql = buildAddColumnSql(
-        target.profile.driverId,
-        qualifiedName,
-        columnName,
-        columnType,
-        nullableChoice.nullable,
-        defaultValue || undefined
-      )
-
-      const mode = await window.showQuickPick(
-        [
-          { label: t('table.runNow'), value: 'run' as const },
-          { label: t('table.openSqlToReview'), value: 'open' as const }
-        ],
-        { placeHolder: t('table.addColumnMode') }
-      )
-      if (!mode) return
-
-      if (mode.value === 'open') {
-        const document = await workspace.openTextDocument({
-          language: 'sql',
-          content: `${sql}\n`
-        })
-        await window.showTextDocument(document)
-        return
-      }
-
-      try {
-        await executeSql(target.profile, sql, target.scope)
-        connectionsTreeProvider?.refreshTable(target.profile, target.tableName, target.scope)
-        window.showInformationMessage(t('table.columnAdded', columnName))
-        await showTableSchemaForTarget(target, { initialTab: 'fields' })
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error)
-        window.showErrorMessage(t('table.addColumnFailed', message))
-      }
+      await showTableSchemaForTarget(target, { initialTab: 'fields' })
     }),
     commands.registerCommand('dbNexus.refreshTable', async (node: FieldNode | IndexNode | SchemaNode | TableDetailGroupNode | undefined) => {
       const target = await resolveTableTarget(node)
@@ -1281,51 +1260,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
         return
       }
 
-      const columnsText = await window.showInputBox({
-        prompt: t('table.indexColumns'),
-        placeHolder: 'column_a, column_b'
-      })
-      if (!columnsText) return
-
-      const columns = columnsText.split(',').map(column => column.trim()).filter(Boolean)
-      if (columns.length === 0) return
-
-      const indexName = await window.showInputBox({
-        prompt: t('table.indexNamePrompt'),
-        value: `idx_${target.tableName}_${columns.join('_')}`
-      })
-      if (!indexName) return
-
-      const uniqueChoice = await window.showQuickPick(
-        [
-          { label: t('table.indexNormal'), unique: false },
-          { label: t('table.indexUnique'), unique: true }
-        ],
-        { placeHolder: t('table.indexTypePrompt') }
-      )
-      if (!uniqueChoice) return
-
-      const sql = buildCreateIndexSql(
-        target.profile.driverId,
-        indexName,
-        target.scope,
-        target.tableName,
-        columns,
-        uniqueChoice.unique
-      )
-
-      try {
-        await executeSql(target.profile, sql, target.scope)
-        connectionsTreeProvider?.refreshTable(target.profile, target.tableName, target.scope)
-        window.showInformationMessage(t('table.indexCreated', indexName))
-        await showTableSchemaForTarget(target, {
-          initialTab: 'indexes',
-          selectedIndexName: indexName
-        })
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error)
-        window.showErrorMessage(t('table.createIndexFailed', message))
-      }
+      await showTableSchemaForTarget(target, { initialTab: 'indexes' })
     }),
     commands.registerCommand('dbNexus.dropIndex', async (node: IndexNode | undefined) => {
       if (!node) {
@@ -2717,6 +2652,364 @@ function buildCreateTableSql(
     ');',
     ''
   ].join('\n')
+}
+
+function buildNewTableDesignSchema(driverId: DatabaseDriverId, tableName: string): TableSchema {
+  const idType = driverId === 'postgresql' || driverId === 'cockroachdb'
+    ? 'BIGSERIAL'
+    : driverId === 'mysql' || driverId === 'mariadb'
+      ? 'INT'
+      : 'INTEGER'
+
+  return {
+    name: tableName,
+    columns: [{
+      name: 'id',
+      type: idType,
+      nullable: false,
+      defaultValue: null,
+      isPrimaryKey: true,
+      isAutoIncrement: true,
+      comment: '',
+      position: 1
+    }],
+    indexes: [],
+    foreignKeys: [],
+    comment: '',
+    metadata: {
+      createSql: buildCreateTableSql(driverId, {}, tableName)
+    }
+  }
+}
+
+function buildCreateTableDesignSql(
+  driverId: DatabaseDriverId,
+  scope: SchemaScope,
+  draft: TableDesignDraft
+): string[] {
+  const qualifiedName = getQualifiedObjectName(driverId, scope, draft.tableName)
+  const columnLines = draft.columns.map(column => `  ${buildColumnDefinitionSql(driverId, column, true)}`)
+  const primaryKeys = draft.columns
+    .filter(column => column.isPrimaryKey)
+    .map(column => quoteSqlIdentifier(driverId, column.name))
+
+  if (primaryKeys.length > 0) {
+    columnLines.push(`  PRIMARY KEY (${primaryKeys.join(', ')})`)
+  }
+
+  const statements = [
+    [
+      `CREATE TABLE ${qualifiedName} (`,
+      columnLines.join(',\n'),
+      ');'
+    ].join('\n')
+  ]
+
+  statements.push(...buildCommentStatements(driverId, qualifiedName, draft, undefined))
+  statements.push(...draft.indexes
+    .filter(index => !index.isPrimary)
+    .map(index => buildCreateIndexSql(driverId, index.name, scope, draft.tableName, index.columns, index.isUnique)))
+
+  return statements
+}
+
+function buildAlterTableDesignSql(
+  driverId: DatabaseDriverId,
+  scope: SchemaScope,
+  originalSchema: TableSchema,
+  draft: TableDesignDraft
+): string[] {
+  const statements: string[] = []
+  const renamed = draft.tableName !== originalSchema.name
+
+  if (renamed) {
+    statements.push(buildRenameTableSql(driverId, scope, originalSchema.name, draft.tableName))
+  }
+
+  const qualifiedName = getQualifiedObjectName(driverId, scope, draft.tableName)
+  const originalColumns = new Map(originalSchema.columns.map(column => [column.name, column]))
+  const draftColumnsByOriginal = new Map(
+    draft.columns
+      .filter(column => column.originalName)
+      .map(column => [column.originalName!, column])
+  )
+
+  const primaryKeyChanged = !sameStringArray(
+    originalSchema.columns.filter(column => column.isPrimaryKey).map(column => column.name),
+    draft.columns.filter(column => column.isPrimaryKey).map(column => column.originalName || column.name)
+  )
+
+  statements.push(...buildIndexDropStatements(driverId, scope, originalSchema, draft))
+
+  if (primaryKeyChanged) {
+    statements.push(...buildDropPrimaryKeySql(driverId, qualifiedName, originalSchema))
+  }
+
+  for (const originalColumn of originalSchema.columns) {
+    if (!draftColumnsByOriginal.has(originalColumn.name)) {
+      statements.push(`ALTER TABLE ${qualifiedName} DROP COLUMN ${quoteSqlIdentifier(driverId, originalColumn.name)};`)
+    }
+  }
+
+  for (const column of draft.columns) {
+    const originalColumn = column.originalName ? originalColumns.get(column.originalName) : undefined
+    if (!originalColumn) {
+      statements.push(`ALTER TABLE ${qualifiedName} ADD COLUMN ${buildColumnDefinitionSql(driverId, column, true)};`)
+      continue
+    }
+
+    statements.push(...buildAlterColumnSql(driverId, qualifiedName, originalColumn, column))
+  }
+
+  if (primaryKeyChanged) {
+    const primaryColumns = draft.columns.filter(column => column.isPrimaryKey).map(column => column.name)
+    if (primaryColumns.length > 0) {
+      statements.push(buildAddPrimaryKeySql(driverId, qualifiedName, primaryColumns))
+    }
+  }
+
+  statements.push(...buildIndexCreateStatements(driverId, scope, originalSchema, draft))
+  statements.push(...buildCommentStatements(driverId, qualifiedName, draft, originalSchema))
+
+  return statements.filter(statement => statement.trim().length > 0)
+}
+
+function buildColumnDefinitionSql(
+  driverId: DatabaseDriverId,
+  column: TableDesignDraft['columns'][number],
+  includeName: boolean
+): string {
+  const parts = includeName ? [quoteSqlIdentifier(driverId, column.name), composeColumnType(column)] : [composeColumnType(column)]
+
+  if (!column.nullable || column.isPrimaryKey) {
+    parts.push('NOT NULL')
+  }
+  if (column.defaultValue !== undefined && column.defaultValue !== null && String(column.defaultValue).trim() !== '') {
+    parts.push('DEFAULT', String(column.defaultValue).trim())
+  }
+  if (column.isAutoIncrement && (driverId === 'mysql' || driverId === 'mariadb')) {
+    parts.push('AUTO_INCREMENT')
+  }
+  if (column.comment && (driverId === 'mysql' || driverId === 'mariadb')) {
+    parts.push('COMMENT', sqlString(column.comment))
+  }
+
+  return parts.join(' ')
+}
+
+function composeColumnType(column: TableDesignDraft['columns'][number]): string {
+  const baseType = String(column.type || '').trim() || 'varchar'
+  const length = String(column.length || '').trim()
+  const decimals = String(column.decimals || '').trim()
+  if (length && decimals) {
+    return `${baseType}(${length}, ${decimals})`
+  }
+  if (length) {
+    return `${baseType}(${length})`
+  }
+  return baseType
+}
+
+function buildAlterColumnSql(
+  driverId: DatabaseDriverId,
+  qualifiedName: string,
+  originalColumn: TableColumn,
+  draftColumn: TableDesignDraft['columns'][number]
+): string[] {
+  const statements: string[] = []
+  const oldName = draftColumn.originalName || originalColumn.name
+  const newName = draftColumn.name
+  const typeChanged = normalizeSqlFragment(originalColumn.type) !== normalizeSqlFragment(composeColumnType(draftColumn))
+  const nullableChanged = originalColumn.nullable !== draftColumn.nullable
+  const defaultChanged = normalizeSqlFragment(originalColumn.defaultValue) !== normalizeSqlFragment(draftColumn.defaultValue)
+  const autoIncrementChanged = originalColumn.isAutoIncrement !== draftColumn.isAutoIncrement
+  const commentChanged = String(originalColumn.comment || '') !== String(draftColumn.comment || '')
+  const nameChanged = oldName !== newName
+
+  if (driverId === 'mysql' || driverId === 'mariadb') {
+    if (nameChanged || typeChanged || nullableChanged || defaultChanged || autoIncrementChanged || commentChanged) {
+      statements.push([
+        'ALTER TABLE',
+        qualifiedName,
+        'CHANGE COLUMN',
+        quoteSqlIdentifier(driverId, oldName),
+        buildColumnDefinitionSql(driverId, draftColumn, true)
+      ].join(' ') + ';')
+    }
+    return statements
+  }
+
+  if (nameChanged) {
+    statements.push(`ALTER TABLE ${qualifiedName} RENAME COLUMN ${quoteSqlIdentifier(driverId, oldName)} TO ${quoteSqlIdentifier(driverId, newName)};`)
+  }
+
+  if (typeChanged) {
+    statements.push(buildAlterColumnTypeSql(driverId, qualifiedName, newName, composeColumnType(draftColumn)))
+  }
+  if (nullableChanged) {
+    statements.push(buildAlterColumnNullSql(driverId, qualifiedName, newName, draftColumn.nullable))
+  }
+  if (defaultChanged) {
+    statements.push(buildAlterColumnDefaultSql(driverId, qualifiedName, newName, draftColumn.defaultValue))
+  }
+  if (autoIncrementChanged && driverId !== 'postgresql' && driverId !== 'cockroachdb') {
+    throw new Error(t('table.autoIncrementAlterNotSupported'))
+  }
+  return statements
+}
+
+function buildAlterColumnTypeSql(driverId: DatabaseDriverId, qualifiedName: string, columnName: string, columnType: string): string {
+  if (driverId === 'postgresql' || driverId === 'cockroachdb') {
+    return `ALTER TABLE ${qualifiedName} ALTER COLUMN ${quoteSqlIdentifier(driverId, columnName)} TYPE ${columnType};`
+  }
+  if (driverId === 'duckdb') {
+    return `ALTER TABLE ${qualifiedName} ALTER COLUMN ${quoteSqlIdentifier(driverId, columnName)} SET DATA TYPE ${columnType};`
+  }
+  if (driverId === 'clickhouse') {
+    return `ALTER TABLE ${qualifiedName} MODIFY COLUMN ${quoteSqlIdentifier(driverId, columnName)} ${columnType};`
+  }
+  throw new Error(t('table.columnAlterNotSupported', driverId))
+}
+
+function buildAlterColumnNullSql(driverId: DatabaseDriverId, qualifiedName: string, columnName: string, nullable: boolean): string {
+  if (driverId === 'postgresql' || driverId === 'cockroachdb' || driverId === 'duckdb') {
+    const action = nullable ? 'DROP NOT NULL' : 'SET NOT NULL'
+    return `ALTER TABLE ${qualifiedName} ALTER COLUMN ${quoteSqlIdentifier(driverId, columnName)} ${action};`
+  }
+  throw new Error(t('table.columnAlterNotSupported', driverId))
+}
+
+function buildAlterColumnDefaultSql(
+  driverId: DatabaseDriverId,
+  qualifiedName: string,
+  columnName: string,
+  defaultValue: string | null | undefined
+): string {
+  if (driverId === 'postgresql' || driverId === 'cockroachdb' || driverId === 'duckdb') {
+    const column = quoteSqlIdentifier(driverId, columnName)
+    if (defaultValue === undefined || defaultValue === null || String(defaultValue).trim() === '') {
+      return `ALTER TABLE ${qualifiedName} ALTER COLUMN ${column} DROP DEFAULT;`
+    }
+    return `ALTER TABLE ${qualifiedName} ALTER COLUMN ${column} SET DEFAULT ${String(defaultValue).trim()};`
+  }
+  throw new Error(t('table.columnAlterNotSupported', driverId))
+}
+
+function buildDropPrimaryKeySql(driverId: DatabaseDriverId, qualifiedName: string, originalSchema: TableSchema): string[] {
+  const originalPrimaryKeys = originalSchema.columns.filter(column => column.isPrimaryKey)
+  if (originalPrimaryKeys.length === 0) {
+    return []
+  }
+
+  if (driverId === 'mysql' || driverId === 'mariadb') {
+    return [`ALTER TABLE ${qualifiedName} DROP PRIMARY KEY;`]
+  }
+  if (driverId === 'postgresql' || driverId === 'cockroachdb') {
+    const primaryIndex = originalSchema.indexes.find(index => index.isPrimary)
+    const constraintName = primaryIndex?.name || `${originalSchema.name}_pkey`
+    return [`ALTER TABLE ${qualifiedName} DROP CONSTRAINT ${quoteSqlIdentifier(driverId, constraintName)};`]
+  }
+
+  throw new Error(t('table.primaryKeyAlterNotSupported', driverId))
+}
+
+function buildAddPrimaryKeySql(driverId: DatabaseDriverId, qualifiedName: string, columns: string[]): string {
+  if (driverId === 'mysql' || driverId === 'mariadb' || driverId === 'postgresql' || driverId === 'cockroachdb') {
+    return `ALTER TABLE ${qualifiedName} ADD PRIMARY KEY (${columns.map(column => quoteSqlIdentifier(driverId, column)).join(', ')});`
+  }
+  throw new Error(t('table.primaryKeyAlterNotSupported', driverId))
+}
+
+function buildIndexDropStatements(
+  driverId: DatabaseDriverId,
+  scope: SchemaScope,
+  originalSchema: TableSchema,
+  draft: TableDesignDraft
+): string[] {
+  const draftByOriginal = new Map(
+    draft.indexes
+      .filter(index => index.originalName)
+      .map(index => [index.originalName!, index])
+  )
+
+  return originalSchema.indexes
+    .filter(index => !index.isPrimary)
+    .filter(index => {
+      const draftIndex = draftByOriginal.get(index.name)
+      return !draftIndex || hasIndexChanged(index, draftIndex)
+    })
+    .map(index => buildDropIndexSql(driverId, scope, draft.tableName, index.name))
+}
+
+function buildIndexCreateStatements(
+  driverId: DatabaseDriverId,
+  scope: SchemaScope,
+  originalSchema: TableSchema,
+  draft: TableDesignDraft
+): string[] {
+  return draft.indexes
+    .filter(index => !index.isPrimary)
+    .filter(index => {
+      if (!index.originalName) {
+        return true
+      }
+      const originalIndex = originalSchema.indexes.find(item => item.name === index.originalName)
+      return originalIndex ? hasIndexChanged(originalIndex, index) : true
+    })
+    .map(index => buildCreateIndexSql(driverId, index.name, scope, draft.tableName, index.columns, index.isUnique))
+}
+
+function hasIndexChanged(originalIndex: TableIndex, draftIndex: TableDesignDraft['indexes'][number]): boolean {
+  return originalIndex.name !== draftIndex.name
+    || originalIndex.isUnique !== draftIndex.isUnique
+    || !sameStringArray(originalIndex.columns, draftIndex.columns)
+    || String(originalIndex.type || '') !== String(draftIndex.type || '')
+}
+
+function buildCommentStatements(
+  driverId: DatabaseDriverId,
+  qualifiedName: string,
+  draft: TableDesignDraft,
+  originalSchema: TableSchema | undefined
+): string[] {
+  const statements: string[] = []
+  if (String(draft.comment || '') !== String(originalSchema?.comment || '')) {
+    statements.push(...buildTableCommentStatements(driverId, qualifiedName, draft.comment || ''))
+  }
+
+  for (const column of draft.columns) {
+    const originalColumn = originalSchema?.columns.find(item => item.name === (column.originalName || column.name))
+    if (String(column.comment || '') !== String(originalColumn?.comment || '')) {
+      statements.push(...buildColumnCommentStatements(driverId, qualifiedName, column.name, column.comment || ''))
+    }
+  }
+
+  return statements
+}
+
+function buildTableCommentStatements(driverId: DatabaseDriverId, qualifiedName: string, comment: string): string[] {
+  if (driverId === 'mysql' || driverId === 'mariadb') {
+    return [`ALTER TABLE ${qualifiedName} COMMENT = ${sqlString(comment)};`]
+  }
+  if (driverId === 'postgresql' || driverId === 'cockroachdb') {
+    return [`COMMENT ON TABLE ${qualifiedName} IS ${comment ? sqlString(comment) : 'NULL'};`]
+  }
+  return []
+}
+
+function buildColumnCommentStatements(driverId: DatabaseDriverId, qualifiedName: string, columnName: string, comment: string): string[] {
+  if (driverId === 'postgresql' || driverId === 'cockroachdb') {
+    return [`COMMENT ON COLUMN ${qualifiedName}.${quoteSqlIdentifier(driverId, columnName)} IS ${comment ? sqlString(comment) : 'NULL'};`]
+  }
+  return []
+}
+
+function sameStringArray(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index])
+}
+
+function normalizeSqlFragment(value: unknown): string {
+  return String(value ?? '').trim().replace(/\s+/g, ' ').toLowerCase()
 }
 
 function buildRenameTableSql(

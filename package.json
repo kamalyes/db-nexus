@@ -444,11 +444,6 @@
       ],
       "view/item/context": [
         {
-          "command": "dbNexus.openDatabase",
-          "when": "view == dbNexus.connections && viewItem == connectionConnected",
-          "group": "1_connection@0"
-        },
-        {
           "command": "dbNexus.connectConnection",
           "when": "view == dbNexus.connections && (viewItem == connectionDisconnected || viewItem == connectionError)",
           "group": "1_connection@0"

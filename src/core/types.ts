@@ -190,6 +190,38 @@ export interface TableSchema {
   metadata?: Record<string, string | number | boolean | null | undefined>
 }
 
+export interface TableDesignColumnDraft {
+  id: string
+  originalName?: string
+  name: string
+  type: string
+  length?: string
+  decimals?: string
+  nullable: boolean
+  defaultValue?: string | null
+  isPrimaryKey: boolean
+  isAutoIncrement: boolean
+  comment?: string
+  position: number
+}
+
+export interface TableDesignIndexDraft {
+  id: string
+  originalName?: string
+  name: string
+  columns: string[]
+  isUnique: boolean
+  isPrimary: boolean
+  type?: string
+}
+
+export interface TableDesignDraft {
+  tableName: string
+  comment?: string
+  columns: TableDesignColumnDraft[]
+  indexes: TableDesignIndexDraft[]
+}
+
 export interface RowChange {
   type: 'insert' | 'update' | 'delete'
   table: string
