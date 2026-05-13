@@ -756,12 +756,20 @@ export async function activate(context: ExtensionContext): Promise<void> {
   }
 
   const revealConnectionInTree = async (profile: DbConnectionProfile): Promise<void> => {
-    connectionsTreeProvider?.refresh()
+    if (!connectionsTreeProvider || !connectionsTreeView) return
+
+    connectionsTreeProvider.refresh()
     try {
-      await connectionsTreeView?.reveal(
-        new ConnectionNode(profile, TreeItemCollapsibleState.Expanded),
-        { focus: true, select: true, expand: true }
-      )
+      const root = new ConnectionNode(profile, TreeItemCollapsibleState.Expanded)
+      const autoExpandPath = await connectionsTreeProvider.getConnectAutoExpandPath(root)
+
+      for (const [index, node] of autoExpandPath.entries()) {
+        await connectionsTreeView.reveal(node, {
+          focus: index === 0,
+          select: index === 0,
+          expand: true
+        })
+      }
     } catch {
       await commands.executeCommand('dbNexus.refreshConnections')
     }

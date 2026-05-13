@@ -204,6 +204,36 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
     this.onDidChangeTreeDataEmitter.fire(node)
   }
 
+  async getConnectAutoExpandPath(root: ConnectionNode): Promise<Array<ConnectionNode | SchemaNode | TablesGroupNode>> {
+    const path: Array<ConnectionNode | SchemaNode | TablesGroupNode> = [root]
+    let current: ConnectionNode | SchemaNode = root
+
+    for (let depth = 0; depth < 6; depth++) {
+      const children: ConnectionTreeNode[] = (await this.getChildren(current)) || []
+      const containerNodes = children.filter((child): child is SchemaNode => this.isExpandableContainerNode(child))
+
+      if (containerNodes.length > 1) {
+        break
+      }
+
+      const tablesGroup = children.find((child): child is TablesGroupNode => child instanceof TablesGroupNode)
+      if (tablesGroup) {
+        path.push(tablesGroup)
+        break
+      }
+
+      if (containerNodes.length === 1) {
+        path.push(containerNodes[0])
+        current = containerNodes[0]
+        continue
+      }
+
+      break
+    }
+
+    return path
+  }
+
   collapseAll(): void {
     this.tableSchemaCache.clear()
     this.treeGeneration++
@@ -795,6 +825,12 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
 
   private isTableLikeObject(object: SchemaObject): boolean {
     return object.type === 'table' || object.type === 'view' || object.type === 'materializedView'
+  }
+
+  private isExpandableContainerNode(node: ConnectionTreeNode): node is SchemaNode {
+    return node instanceof SchemaNode
+      && !this.isTableLikeObject(node.schemaObject)
+      && node.collapsibleState !== TreeItemCollapsibleState.None
   }
 
   private getDriverIcon(driverId: DatabaseDriverId): Uri | ThemeIcon | { dark: Uri; light: Uri } {
