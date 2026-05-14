@@ -2894,7 +2894,7 @@ function buildColumnDefinitionSql(
   if (column.isAutoIncrement && (driverId === 'mysql' || driverId === 'mariadb')) {
     parts.push('AUTO_INCREMENT')
   }
-  if (column.comment && (driverId === 'mysql' || driverId === 'mariadb')) {
+  if (column.comment && supportsInlineColumnComment(driverId)) {
     parts.push('COMMENT', sqlString(column.comment))
   }
 
@@ -3039,7 +3039,7 @@ function buildDropPrimaryKeySql(driverId: DatabaseDriverId, qualifiedName: strin
 }
 
 function buildAddPrimaryKeySql(driverId: DatabaseDriverId, qualifiedName: string, columns: string[]): string {
-  if (driverId === 'mysql' || driverId === 'mariadb' || driverId === 'postgresql' || driverId === 'cockroachdb') {
+  if (driverId === 'mysql' || driverId === 'mariadb' || driverId === 'postgresql' || driverId === 'cockroachdb' || driverId === 'duckdb') {
     return `ALTER TABLE ${qualifiedName} ADD PRIMARY KEY (${columns.map(column => quoteSqlIdentifier(driverId, column)).join(', ')});`
   }
   throw new Error(t('table.primaryKeyAlterNotSupported', driverId))
@@ -3104,6 +3104,9 @@ function buildCommentStatements(
 
   for (const column of draft.columns) {
     const originalColumn = originalSchema?.columns.find(item => item.name === (column.originalName || column.name))
+    if (!originalColumn && supportsInlineColumnComment(driverId)) {
+      continue
+    }
     if (String(column.comment || '') !== String(originalColumn?.comment || '')) {
       statements.push(...buildColumnCommentStatements(driverId, qualifiedName, column.name, column.comment || ''))
     }
@@ -3116,17 +3119,27 @@ function buildTableCommentStatements(driverId: DatabaseDriverId, qualifiedName: 
   if (driverId === 'mysql' || driverId === 'mariadb') {
     return [`ALTER TABLE ${qualifiedName} COMMENT = ${sqlString(comment)};`]
   }
-  if (driverId === 'postgresql' || driverId === 'cockroachdb') {
+  if (driverId === 'postgresql' || driverId === 'cockroachdb' || driverId === 'duckdb') {
     return [`COMMENT ON TABLE ${qualifiedName} IS ${comment ? sqlString(comment) : 'NULL'};`]
+  }
+  if (driverId === 'clickhouse') {
+    return [`ALTER TABLE ${qualifiedName} MODIFY COMMENT ${sqlString(comment)};`]
   }
   return []
 }
 
 function buildColumnCommentStatements(driverId: DatabaseDriverId, qualifiedName: string, columnName: string, comment: string): string[] {
-  if (driverId === 'postgresql' || driverId === 'cockroachdb') {
+  if (driverId === 'postgresql' || driverId === 'cockroachdb' || driverId === 'duckdb') {
     return [`COMMENT ON COLUMN ${qualifiedName}.${quoteSqlIdentifier(driverId, columnName)} IS ${comment ? sqlString(comment) : 'NULL'};`]
   }
+  if (driverId === 'clickhouse') {
+    return [`ALTER TABLE ${qualifiedName} COMMENT COLUMN ${quoteSqlIdentifier(driverId, columnName)} ${sqlString(comment)};`]
+  }
   return []
+}
+
+function supportsInlineColumnComment(driverId: DatabaseDriverId): boolean {
+  return driverId === 'mysql' || driverId === 'mariadb' || driverId === 'clickhouse'
 }
 
 function sameStringArray(left: string[], right: string[]): boolean {

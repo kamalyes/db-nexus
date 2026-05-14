@@ -574,8 +574,19 @@ export class TableDataPanel {
       font-size: 11px;
     }
     .pk-indicator {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 24px;
+      height: 17px;
+      padding: 0 4px;
+      border-radius: 3px;
       color: var(--vscode-textLink-foreground);
+      border: 1px solid color-mix(in srgb, var(--vscode-textLink-foreground) 55%, transparent);
+      background: color-mix(in srgb, var(--vscode-textLink-foreground) 12%, transparent);
+      font-size: 10px;
       font-weight: 700;
+      line-height: 1;
     }
     .col-resizer {
       position: absolute;
@@ -1244,8 +1255,19 @@ export class TableDataPanel {
       }
     }
     .pk-indicator {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 24px;
+      height: 17px;
+      padding: 0 4px;
+      border-radius: 3px;
       color: var(--vscode-textLink-foreground);
-      font-weight: bold;
+      border: 1px solid color-mix(in srgb, var(--vscode-textLink-foreground) 55%, transparent);
+      background: color-mix(in srgb, var(--vscode-textLink-foreground) 12%, transparent);
+      font-size: 10px;
+      font-weight: 700;
+      line-height: 1;
     }
     .null-value {
       color: var(--vscode-descriptionForeground);
@@ -1696,9 +1718,19 @@ export class TableDataPanel {
       font-size: 10px;
     }
     .pk-indicator {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 24px;
+      height: 17px;
+      padding: 0 4px;
+      border-radius: 3px;
       color: var(--vscode-textLink-foreground);
-      font-size: 11px;
+      border: 1px solid color-mix(in srgb, var(--vscode-textLink-foreground) 55%, transparent);
+      background: color-mix(in srgb, var(--vscode-textLink-foreground) 12%, transparent);
+      font-size: 10px;
       font-weight: 700;
+      line-height: 1;
     }
     .row-marker {
       color: var(--vscode-descriptionForeground);

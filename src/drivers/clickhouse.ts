@@ -122,9 +122,15 @@ export class ClickHouseDriver implements DatabaseDriver {
   }
 
   async listDatabases(profile: DbConnectionProfile): Promise<DatabaseCatalog[]> {
-    const result = await this.query(profile, 'SHOW DATABASES')
+    const result = await this.query(profile, `
+      SELECT name, comment
+      FROM system.databases
+      WHERE name NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema')
+      ORDER BY name
+    `)
     return (result.data || []).map((row: Record<string, unknown>) => ({
-      name: String(row.name || '')
+      name: String(row.name || ''),
+      description: stringOrUndefined(row.comment)
     }))
   }
 
@@ -143,13 +149,20 @@ export class ClickHouseDriver implements DatabaseDriver {
       }
     } else {
       // List tables in the database
-      const result = await this.query(profile, `SHOW TABLES FROM ${scope.database}`)
+      const result = await this.query(profile, `
+        SELECT name, engine, total_rows, comment
+        FROM system.tables
+        WHERE database = '${escapeSqlLiteral(scope.database)}'
+        ORDER BY name
+      `)
       for (const row of result.data || []) {
-        const tableName = Object.values(row)[0] as string
+        const tableName = String(row.name || '')
+        const engine = String(row.engine || '')
         objects.push({
           name: tableName,
-          type: 'table' as SchemaObjectType,
-          description: 'Table'
+          type: (engine.toLowerCase().includes('view') ? 'view' : 'table') as SchemaObjectType,
+          description: stringOrUndefined(row.comment) || engine || 'Table',
+          rowCount: numberOrUndefined(row.total_rows)
         })
       }
     }
@@ -212,7 +225,8 @@ export class ClickHouseDriver implements DatabaseDriver {
         create_table_query,
         primary_key,
         sorting_key,
-        partition_key
+        partition_key,
+        comment
       FROM system.tables
       WHERE database = '${escapeSqlLiteral(database)}'
         AND name = '${escapeSqlLiteral(tableName)}'
@@ -228,6 +242,7 @@ export class ClickHouseDriver implements DatabaseDriver {
     metadata.primaryKeys = stringOrUndefined(tableInfo.primary_key)
     metadata.sortingKey = stringOrUndefined(tableInfo.sorting_key)
     metadata.partitionKey = stringOrUndefined(tableInfo.partition_key)
+    metadata.comment = stringOrUndefined(tableInfo.comment)
 
     const columnsResult = await this.query(profile, `
       SELECT
@@ -283,7 +298,7 @@ export class ClickHouseDriver implements DatabaseDriver {
       columns,
       indexes,
       foreignKeys: [],
-      comment: columns.find(column => column.comment)?.comment,
+      comment: stringOrUndefined(tableInfo.comment),
       metadata
     }
   }

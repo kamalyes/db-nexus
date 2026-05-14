@@ -176,6 +176,7 @@ export class TableSchemaPanel {
     const scope = panelContext.scope || {}
     const objectType = panelContext.objectType || 'table'
     const metadata = schema.metadata || {}
+    const tableComment = String(schema.comment ?? metadata.comment ?? '')
     const qualifiedName = getQualifiedName(profile, scope, schema.name)
     const initialTab = panelContext.initialTab || 'fields'
     const selectedIndexName = panelContext.selectedIndexName
@@ -239,6 +240,9 @@ export class TableSchemaPanel {
     const fieldRowsHtml = schema.columns.map((column, index) => {
       const typeParts = getTypeParts(column.type)
       const keyLabel = column.isPrimaryKey ? `PK ${primaryKeys.indexOf(column.name) + 1}` : ''
+      const keyBadge = column.isPrimaryKey
+        ? `<span class="pk-indicator" title="${escapeAttribute(t('table.primaryKey'))}">PK</span>`
+        : ''
       return `
         <tr class="field-row ${index === 0 ? 'selected' : ''}" data-column="${escapeAttribute(column.name)}" data-id="${escapeAttribute(designColumns[index].id)}">
           <td class="order-cell">${index + 1}</td>
@@ -248,7 +252,7 @@ export class TableSchemaPanel {
           <td data-edit="decimals">${escapeHtml(typeParts.decimals || '')}</td>
           <td class="check-cell"><input data-edit="notNull" type="checkbox" ${canEdit ? '' : 'disabled'} ${!column.nullable ? 'checked' : ''}></td>
           <td class="check-cell"><input data-edit="autoIncrement" type="checkbox" ${canEdit ? '' : 'disabled'} ${column.isAutoIncrement ? 'checked' : ''}></td>
-          <td data-edit="key">${escapeHtml(keyLabel)}</td>
+          <td data-edit="key">${keyBadge}${keyLabel ? `<span class="key-text">${escapeHtml(keyLabel)}</span>` : ''}</td>
           <td data-edit="defaultValue">${escapeHtml(formatEmpty(column.defaultValue))}</td>
           <td data-edit="comment">${escapeHtml(formatEmpty(column.comment))}</td>
         </tr>
@@ -542,6 +546,35 @@ export class TableSchemaPanel {
     .comment-control {
       min-width: 180px;
     }
+    .key-control {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+    .key-control .field-control {
+      flex: 1 1 auto;
+    }
+    .pk-indicator {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 24px;
+      height: 17px;
+      padding: 0 4px;
+      border-radius: 3px;
+      color: var(--vscode-textLink-foreground);
+      border: 1px solid color-mix(in srgb, var(--vscode-textLink-foreground) 55%, transparent);
+      background: color-mix(in srgb, var(--vscode-textLink-foreground) 12%, transparent);
+      font-size: 10px;
+      font-weight: 700;
+      line-height: 1;
+    }
+    .key-text {
+      margin-left: 6px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+    }
     .table-name-input {
       max-width: 280px;
       font-weight: 600;
@@ -703,7 +736,7 @@ export class TableSchemaPanel {
                 <th style="width: 80px">${t('table.decimals')}</th>
                 <th style="width: 90px">${t('table.notNull')}</th>
                 <th style="width: 80px">${t('table.auto')}</th>
-                <th style="width: 100px">${t('table.key')}</th>
+                <th style="width: 140px">${t('table.key')}</th>
                 <th style="width: 160px">${t('table.default')}</th>
                 <th>${t('table.comment')}</th>
               </tr>
@@ -761,10 +794,10 @@ export class TableSchemaPanel {
           ])}
         </div>
         <div class="tab-panel ${getActiveClass(initialTab, 'comment')}" id="tab-comment">
-          ${canEdit ? `<textarea class="comment-editor" id="tableCommentInput">${escapeHtml(schema.comment || '')}</textarea>` : `<div class="comment">${escapeHtml(formatEmpty(schema.comment))}</div>`}
+          ${canEdit ? `<textarea class="comment-editor" id="tableCommentInput">${escapeHtml(tableComment)}</textarea>` : `<div class="comment">${escapeHtml(formatEmpty(tableComment))}</div>`}
         </div>
         <div class="tab-panel ${getActiveClass(initialTab, 'sql')}" id="tab-sql">
-          <pre class="sql-preview" id="sqlPreview">${escapeHtml(String(metadata.createSql || buildCreateTablePreview(profile, scope, schema)))}</pre>
+          <pre class="sql-preview" id="sqlPreview">${escapeHtml(String(metadata.createSql || buildCreateTablePreview(profile, scope, { ...schema, comment: tableComment })))}</pre>
         </div>
       </section>
     </main>
@@ -1074,7 +1107,7 @@ export class TableSchemaPanel {
 
     function getTableComment() {
       const input = document.getElementById('tableCommentInput');
-      return input ? input.value : ${escapeScriptJson(JSON.stringify(schema.comment || ''))};
+      return input ? input.value : ${escapeScriptJson(JSON.stringify(tableComment))};
     }
 
     function getActiveTab() {
@@ -1154,6 +1187,7 @@ export class TableSchemaPanel {
       body.innerHTML = draftColumns.map((column, index) => {
         const selected = column.id === selectedColumnId ? 'selected' : '';
         const dirtyClass = column.originalName ? '' : 'dirty';
+        const keyBadge = column.isPrimaryKey ? '<span class="pk-indicator" title="' + escapeAttribute(labels.primaryKey) + '">PK</span>' : '';
         return [
           '<tr class="field-row ' + selected + ' ' + dirtyClass + '" data-column="' + escapeAttribute(column.name) + '" data-id="' + escapeAttribute(column.id) + '">',
           '<td class="order-cell">' + (index + 1) + '</td>',
@@ -1163,7 +1197,7 @@ export class TableSchemaPanel {
           '<td class="control-cell"><input class="field-control" data-edit="decimals" value="' + escapeAttribute(column.decimals || '') + '" ' + (canEdit ? '' : 'disabled') + '></td>',
           '<td class="check-cell"><input data-edit="notNull" type="checkbox" ' + (canEdit ? '' : 'disabled') + (!column.nullable ? ' checked' : '') + '></td>',
           '<td class="check-cell"><input data-edit="autoIncrement" type="checkbox" ' + (canEdit ? '' : 'disabled') + (column.isAutoIncrement ? ' checked' : '') + '></td>',
-          '<td class="control-cell"><select class="field-control" data-edit="key" ' + (canEdit ? '' : 'disabled') + '><option value=""></option><option value="primary"' + (column.isPrimaryKey ? ' selected' : '') + '>' + escapeHtml(labels.primaryKey) + '</option></select></td>',
+          '<td class="control-cell"><div class="key-control">' + keyBadge + '<select class="field-control" data-edit="key" ' + (canEdit ? '' : 'disabled') + '><option value=""></option><option value="primary"' + (column.isPrimaryKey ? ' selected' : '') + '>' + escapeHtml(labels.primaryKey) + '</option></select></div></td>',
           '<td class="control-cell"><input class="field-control" data-edit="defaultValue" value="' + escapeAttribute(column.defaultValue || '') + '" ' + (canEdit ? '' : 'disabled') + '></td>',
           '<td class="control-cell"><input class="field-control comment-control" data-edit="comment" value="' + escapeAttribute(column.comment || '') + '" ' + (canEdit ? '' : 'disabled') + '></td>',
           '</tr>'
@@ -1507,7 +1541,7 @@ export class TableSchemaPanel {
         if (!column.nullable || column.isPrimaryKey) parts.push('NOT NULL');
         if (column.defaultValue) parts.push('DEFAULT ' + column.defaultValue);
         if (column.isAutoIncrement && (driverId === 'mysql' || driverId === 'mariadb')) parts.push('AUTO_INCREMENT');
-        if (column.comment && (driverId === 'mysql' || driverId === 'mariadb')) parts.push('COMMENT ' + sqlString(column.comment));
+        if (column.comment && (driverId === 'mysql' || driverId === 'mariadb' || driverId === 'clickhouse')) parts.push('COMMENT ' + sqlString(column.comment));
         return parts.join(' ');
       });
       const primaryKeys = draftColumns.filter(column => column.isPrimaryKey).map(column => quoteIdentifier(column.name));
@@ -1518,7 +1552,7 @@ export class TableSchemaPanel {
         .filter(index => !index.isPrimary && index.name && index.columns.length > 0)
         .map(index => 'CREATE ' + (index.isUnique ? 'UNIQUE ' : '') + 'INDEX ' + quoteIdentifier(index.name) + ' ON ' + getQualifiedName(tableName) + ' (' + index.columns.map(quoteIdentifier).join(', ') + ');');
       const commentLines = [];
-      if (driverId === 'postgresql' || driverId === 'cockroachdb') {
+      if (driverId === 'postgresql' || driverId === 'cockroachdb' || driverId === 'duckdb') {
         if (getTableComment()) {
           commentLines.push('COMMENT ON TABLE ' + getQualifiedName(tableName) + ' IS ' + sqlString(getTableComment()) + ';');
         }
@@ -1529,6 +1563,8 @@ export class TableSchemaPanel {
         });
       } else if ((driverId === 'mysql' || driverId === 'mariadb') && getTableComment()) {
         commentLines.push('ALTER TABLE ' + getQualifiedName(tableName) + ' COMMENT = ' + sqlString(getTableComment()) + ';');
+      } else if (driverId === 'clickhouse' && getTableComment()) {
+        commentLines.push('ALTER TABLE ' + getQualifiedName(tableName) + ' MODIFY COMMENT ' + sqlString(getTableComment()) + ';');
       }
       preview.textContent = [
         'CREATE TABLE ' + getQualifiedName(tableName) + ' (',
@@ -1782,6 +1818,9 @@ function buildCreateTablePreview(
     if (column.isAutoIncrement && (driverId === 'mysql' || driverId === 'mariadb')) {
       parts.push('AUTO_INCREMENT')
     }
+    if (column.comment && (driverId === 'mysql' || driverId === 'mariadb' || driverId === 'clickhouse')) {
+      parts.push('COMMENT', sqlString(column.comment))
+    }
     return parts.join(' ')
   })
 
@@ -1790,10 +1829,27 @@ function buildCreateTablePreview(
     columnLines.push(`  PRIMARY KEY (${primaryKeys.join(', ')})`)
   }
 
+  const commentLines: string[] = []
+  if (driverId === 'postgresql' || driverId === 'cockroachdb' || driverId === 'duckdb') {
+    if (schema.comment) {
+      commentLines.push(`COMMENT ON TABLE ${qualifiedName} IS ${sqlString(schema.comment)};`)
+    }
+    schema.columns.forEach(column => {
+      if (column.comment) {
+        commentLines.push(`COMMENT ON COLUMN ${qualifiedName}.${quoteIdentifier(driverId, column.name)} IS ${sqlString(column.comment)};`)
+      }
+    })
+  } else if ((driverId === 'mysql' || driverId === 'mariadb') && schema.comment) {
+    commentLines.push(`ALTER TABLE ${qualifiedName} COMMENT = ${sqlString(schema.comment)};`)
+  } else if (driverId === 'clickhouse' && schema.comment) {
+    commentLines.push(`ALTER TABLE ${qualifiedName} MODIFY COMMENT ${sqlString(schema.comment)};`)
+  }
+
   return [
     `CREATE TABLE ${qualifiedName} (`,
     columnLines.join(',\n'),
     ');',
+    ...commentLines,
     ''
   ].join('\n')
 }
@@ -1803,6 +1859,10 @@ function quoteIdentifier(driverId: string, identifier: string): string {
     return `\`${String(identifier).replace(/`/g, '``')}\``
   }
   return `"${String(identifier).replace(/"/g, '""')}"`
+}
+
+function sqlString(value: string): string {
+  return `'${String(value).replace(/'/g, "''")}'`
 }
 
 function formatBytes(value: unknown): string | undefined {

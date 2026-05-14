@@ -109,11 +109,23 @@ export class DuckDBDriver implements DatabaseDriver {
   async listObjects(profile: DbConnectionProfile, scope: SchemaScope): Promise<SchemaObject[]> {
     const conn = await this.getConnection(profile)
     const objects: SchemaObject[] = []
+    const schemaName = scope.schema || scope.database || 'main'
 
     const tablesResult = await conn.execute(`
-      SELECT table_name, table_type 
-      FROM information_schema.tables 
-      WHERE table_schema = 'main'
+      SELECT
+        t.table_name,
+        t.table_type,
+        COALESCE(dt.comment, dv.comment, '') AS comment,
+        dt.estimated_size
+      FROM information_schema.tables t
+      LEFT JOIN duckdb_tables() dt
+        ON dt.schema_name = t.table_schema
+       AND dt.table_name = t.table_name
+      LEFT JOIN duckdb_views() dv
+        ON dv.schema_name = t.table_schema
+       AND dv.view_name = t.table_name
+      WHERE t.table_schema = '${escapeSqlLiteral(schemaName)}'
+      ORDER BY t.table_name
     `)
     
     for (const row of tablesResult.rows) {
@@ -122,7 +134,8 @@ export class DuckDBDriver implements DatabaseDriver {
       objects.push({
         name,
         type: type === 'view' ? 'view' : 'table',
-        description: '',
+        description: stringOrUndefined(row[2]) || (type === 'view' ? 'View' : 'Table'),
+        rowCount: numberOrUndefined(row[3]),
         hasChildren: type !== 'view'
       })
     }
@@ -182,7 +195,8 @@ export class DuckDBDriver implements DatabaseDriver {
           column_count,
           index_count,
           check_constraint_count,
-          sql
+          sql,
+          comment
         FROM duckdb_tables()
         WHERE table_name = '${escapeSqlLiteral(tableName)}'
           AND schema_name = '${escapeSqlLiteral(schemaName)}'
@@ -197,6 +211,7 @@ export class DuckDBDriver implements DatabaseDriver {
         metadata.indexCount = numberOrUndefined(tableInfo.index_count)
         metadata.checkCount = numberOrUndefined(tableInfo.check_constraint_count)
         metadata.createSql = stringOrUndefined(tableInfo.sql)
+        metadata.comment = stringOrUndefined(tableInfo.comment)
       }
     } catch {
       // duckdb_tables() is best-effort across DuckDB versions.
@@ -207,26 +222,46 @@ export class DuckDBDriver implements DatabaseDriver {
       metadata.dataLength = metadata.databaseSize
     }
 
+    const primaryKeyColumns = new Set<string>()
+    try {
+      const constraintsResult = await conn.execute(`
+        SELECT constraint_column_names
+        FROM duckdb_constraints()
+        WHERE table_name = '${escapeSqlLiteral(tableName)}'
+          AND schema_name = '${escapeSqlLiteral(schemaName)}'
+          AND constraint_type = 'PRIMARY KEY'
+      `)
+      for (const row of constraintsResult.rows) {
+        for (const columnName of parseDuckStringList(row[0])) {
+          primaryKeyColumns.add(columnName)
+        }
+      }
+    } catch {
+      // Primary key metadata is best-effort across DuckDB versions.
+    }
+
     const columnsResult = await conn.execute(`
-      SELECT 
+      SELECT
         column_name,
         data_type,
         is_nullable,
         column_default,
-        ordinal_position
-      FROM information_schema.columns
-      WHERE table_name = '${tableName}' AND table_schema = 'main'
-      ORDER BY ordinal_position
+        column_index,
+        comment
+      FROM duckdb_columns()
+      WHERE table_name = '${escapeSqlLiteral(tableName)}'
+        AND schema_name = '${escapeSqlLiteral(schemaName)}'
+      ORDER BY column_index
     `)
 
     const columns: TableColumn[] = columnsResult.rows.map((row: unknown[]) => ({
       name: String(row[0]),
       type: String(row[1]),
-      nullable: row[2] === 'YES',
+      nullable: row[2] === true || row[2] === 'YES' || String(row[2]).toLowerCase() === 'true',
       defaultValue: row[3] ? String(row[3]) : null,
-      isPrimaryKey: false,
+      isPrimaryKey: primaryKeyColumns.has(String(row[0])),
       isAutoIncrement: false,
-      comment: '',
+      comment: String(row[5] || ''),
       position: Number(row[4])
     }))
 
@@ -255,6 +290,7 @@ export class DuckDBDriver implements DatabaseDriver {
       columns,
       indexes: Array.from(indexMap.values()),
       foreignKeys: [],
+      comment: stringOrUndefined(metadata.comment),
       metadata
     }
   }
@@ -387,6 +423,18 @@ function firstDuckValue(result: DuckDBResult): string | undefined {
 
 function escapeSqlLiteral(value: string): string {
   return String(value).replace(/'/g, "''")
+}
+
+function parseDuckStringList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map(String).filter(Boolean)
+  }
+
+  return String(value || '')
+    .replace(/^\[|\]$/g, '')
+    .split(',')
+    .map(item => item.trim().replace(/^['"]|['"]$/g, ''))
+    .filter(Boolean)
 }
 
 function stringOrUndefined(value: unknown): string | undefined {

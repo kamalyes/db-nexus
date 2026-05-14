@@ -125,17 +125,28 @@ export class PostgreSQLDriver implements DatabaseDriver {
       }
     } else {
       const result = await pool.query(
-        `SELECT table_name as name, table_type as type
-         FROM information_schema.tables
-         WHERE table_schema = $1
-         ORDER BY table_name`,
+        `SELECT
+           t.table_name as name,
+           t.table_type as type,
+           obj_description(c.oid, 'pg_class') AS comment,
+           c.reltuples::bigint AS row_count
+         FROM information_schema.tables t
+         LEFT JOIN pg_catalog.pg_namespace n
+           ON n.nspname = t.table_schema
+         LEFT JOIN pg_catalog.pg_class c
+           ON c.relname = t.table_name
+          AND c.relnamespace = n.oid
+         WHERE t.table_schema = $1
+         ORDER BY t.table_name`,
         [scope.schema]
       )
-      for (const row of result.rows as Array<{ name: string; type: string }>) {
+      for (const row of result.rows as Array<{ name: string; type: string; comment?: string; row_count?: unknown }>) {
+        const rowCount = numberOrUndefined(row.row_count)
         objects.push({
           name: row.name,
           type: row.type === 'VIEW' ? 'view' : 'table' as SchemaObjectType,
-          description: row.type
+          description: row.comment || row.type,
+          rowCount: rowCount !== undefined && rowCount >= 0 ? rowCount : undefined
         })
       }
     }

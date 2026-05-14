@@ -111,17 +111,22 @@ export class MySQLDriver implements DatabaseDriver {
       }
     } else {
       const [rows] = await pool.query(
-        `SELECT table_name as name, table_type as type
+        `SELECT
+           table_name as name,
+           table_type as type,
+           table_comment as comment,
+           table_rows as row_count
          FROM information_schema.tables
          WHERE table_schema = ?
          ORDER BY table_name`,
         [scope.database]
       )
-      for (const row of rows as Array<{ name: string; type: string }>) {
+      for (const row of rows as Array<{ name: string; type: string; comment?: string; row_count?: unknown }>) {
         objects.push({
           name: row.name,
           type: row.type === 'VIEW' ? 'view' : 'table' as SchemaObjectType,
-          description: row.type
+          description: row.comment || row.type,
+          rowCount: numberOrUndefined(row.row_count)
         })
       }
     }
