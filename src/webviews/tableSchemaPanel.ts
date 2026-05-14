@@ -103,6 +103,38 @@ export class TableSchemaPanel {
         return
       }
 
+      if (message.type === 'reloadSchema') {
+        const activeTab = isTableSchemaTab(message.activeTab) ? message.activeTab : currentPanelContext.initialTab
+        if ((currentPanelContext.mode || 'design') === 'create') {
+          currentPanelContext = {
+            ...currentPanelContext,
+            initialTab: activeTab,
+            loadedAt: new Date().toISOString()
+          }
+          panel.webview.html = this.render(currentSchema, currentPanelContext)
+          return
+        }
+
+        const reloadedSchema = await commands.executeCommand<TableSchema | undefined>('dbNexus.reloadTableSchema', {
+          profile: currentPanelContext.profile,
+          scope,
+          tableName: currentSchema.name,
+          objectType
+        })
+        if (reloadedSchema) {
+          currentSchema = reloadedSchema
+          currentPanelContext = {
+            ...currentPanelContext,
+            mode: 'design',
+            initialTab: activeTab,
+            loadedAt: new Date().toISOString()
+          }
+          panel.title = t('table.schemaTitle', reloadedSchema.name)
+          panel.webview.html = this.render(currentSchema, currentPanelContext)
+        }
+        return
+      }
+
       if (message.type === 'dropColumn' && typeof message.columnName === 'string') {
         const column = currentSchema.columns.find(item => item.name === message.columnName)
         if (!column) {
@@ -209,6 +241,7 @@ export class TableSchemaPanel {
       const keyLabel = column.isPrimaryKey ? `PK ${primaryKeys.indexOf(column.name) + 1}` : ''
       return `
         <tr class="field-row ${index === 0 ? 'selected' : ''}" data-column="${escapeAttribute(column.name)}" data-id="${escapeAttribute(designColumns[index].id)}">
+          <td class="order-cell">${index + 1}</td>
           <td data-edit="name">${escapeHtml(column.name)}</td>
           <td data-edit="type">${escapeHtml(typeParts.baseType || column.type)}</td>
           <td data-edit="length">${escapeHtml(typeParts.length || '')}</td>
@@ -474,6 +507,41 @@ export class TableSchemaPanel {
       font: inherit;
       padding: 2px 4px;
     }
+    .control-cell {
+      padding: 2px 4px;
+    }
+    .order-cell {
+      width: 44px;
+      color: var(--vscode-descriptionForeground);
+      text-align: right;
+    }
+    .field-control {
+      width: 100%;
+      min-width: 0;
+      min-height: 25px;
+      color: inherit;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: 2px;
+      font: inherit;
+      padding: 2px 4px;
+    }
+    select.field-control {
+      appearance: auto;
+    }
+    .field-control:hover {
+      background: var(--vscode-input-background);
+      border-color: var(--vscode-input-border, var(--vscode-panel-border));
+    }
+    .field-control:focus {
+      color: var(--vscode-input-foreground);
+      background: var(--vscode-input-background);
+      border-color: var(--vscode-focusBorder);
+      outline: none;
+    }
+    .comment-control {
+      min-width: 180px;
+    }
     .table-name-input {
       max-width: 280px;
       font-weight: 600;
@@ -600,6 +668,7 @@ export class TableSchemaPanel {
 
       <div class="toolbar" aria-label="Table design actions">
         <button class="tool" id="saveDesignButton" ${canEdit ? 'disabled' : 'disabled'}>${t('common.save')}</button>
+        <button class="tool" id="cancelDesignButton" ${canEdit ? '' : 'disabled'}>${t('common.cancel')}</button>
         <button class="tool" id="mockDataButton" ${isCreateMode ? 'disabled' : ''}>${t('table.mockDataAction')}</button>
         <button class="tool" id="addColumnButton" ${canEdit ? '' : 'disabled'}>${t('table.addColumnAction')}</button>
         <button class="tool" id="insertColumnButton" ${canEdit ? '' : 'disabled'}>${t('table.insertColumnAction')}</button>
@@ -627,8 +696,9 @@ export class TableSchemaPanel {
           <table>
             <thead>
               <tr>
+                <th style="width: 44px">#</th>
                 <th style="width: 220px">${t('table.columnName')}</th>
-                <th style="width: 150px">${t('table.columnType')}</th>
+                <th style="width: 180px">${t('table.columnType')}</th>
                 <th style="width: 80px">${t('table.length')}</th>
                 <th style="width: 80px">${t('table.decimals')}</th>
                 <th style="width: 90px">${t('table.notNull')}</th>
@@ -926,6 +996,29 @@ export class TableSchemaPanel {
       return { length: '', decimals: '' };
     }
 
+    function getUniqueValues(values) {
+      const seen = new Set();
+      return values.filter(value => {
+        const text = normalizeName(value);
+        const key = text.toLowerCase();
+        if (!text || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
+
+    function renderSelectOption(value, selectedValue) {
+      const selected = String(value).toLowerCase() === String(selectedValue).toLowerCase() ? ' selected' : '';
+      return '<option value="' + escapeAttribute(value) + '"' + selected + '>' + escapeHtml(value) + '</option>';
+    }
+
+    function renderTypeOptions(column) {
+      const current = composeType(column);
+      return getUniqueValues([current, ...typeHints])
+        .map(type => renderSelectOption(type, current))
+        .join('');
+    }
+
     function applyTypeInput(column, value) {
       const parsed = parseTypeInput(value);
       const defaults = getTypeDefaults(parsed.type);
@@ -945,6 +1038,10 @@ export class TableSchemaPanel {
         return baseType + '(' + length + ')';
       }
       return baseType;
+    }
+
+    function sqlString(value) {
+      return "'" + String(value).replace(/'/g, "''") + "'";
     }
 
     function quoteIdentifier(identifier) {
@@ -1054,20 +1151,21 @@ export class TableSchemaPanel {
     function renderFields() {
       const body = document.getElementById('fieldsBody');
       if (!body) return;
-      body.innerHTML = draftColumns.map(column => {
+      body.innerHTML = draftColumns.map((column, index) => {
         const selected = column.id === selectedColumnId ? 'selected' : '';
         const dirtyClass = column.originalName ? '' : 'dirty';
         return [
           '<tr class="field-row ' + selected + ' ' + dirtyClass + '" data-column="' + escapeAttribute(column.name) + '" data-id="' + escapeAttribute(column.id) + '">',
-          '<td class="' + (canEdit ? 'editable' : '') + '" data-edit="name">' + escapeHtml(column.name) + '</td>',
-          '<td class="' + (canEdit ? 'editable' : '') + '" data-edit="type">' + escapeHtml(column.type) + '</td>',
-          '<td class="' + (canEdit ? 'editable' : '') + '" data-edit="length">' + escapeHtml(column.length || '') + '</td>',
-          '<td class="' + (canEdit ? 'editable' : '') + '" data-edit="decimals">' + escapeHtml(column.decimals || '') + '</td>',
+          '<td class="order-cell">' + (index + 1) + '</td>',
+          '<td class="control-cell"><input class="field-control" data-edit="name" value="' + escapeAttribute(column.name) + '" ' + (canEdit ? '' : 'disabled') + '></td>',
+          '<td class="control-cell"><select class="field-control type-control" data-edit="type" ' + (canEdit ? '' : 'disabled') + '>' + renderTypeOptions(column) + '</select></td>',
+          '<td class="control-cell"><input class="field-control" data-edit="length" value="' + escapeAttribute(column.length || '') + '" ' + (canEdit ? '' : 'disabled') + '></td>',
+          '<td class="control-cell"><input class="field-control" data-edit="decimals" value="' + escapeAttribute(column.decimals || '') + '" ' + (canEdit ? '' : 'disabled') + '></td>',
           '<td class="check-cell"><input data-edit="notNull" type="checkbox" ' + (canEdit ? '' : 'disabled') + (!column.nullable ? ' checked' : '') + '></td>',
           '<td class="check-cell"><input data-edit="autoIncrement" type="checkbox" ' + (canEdit ? '' : 'disabled') + (column.isAutoIncrement ? ' checked' : '') + '></td>',
-          '<td class="' + (canEdit ? 'editable' : '') + '" data-edit="key">' + escapeHtml(keyText(column)) + '</td>',
-          '<td class="' + (canEdit ? 'editable' : '') + '" data-edit="defaultValue">' + escapeHtml(formatEmpty(column.defaultValue)) + '</td>',
-          '<td class="' + (canEdit ? 'editable' : '') + '" data-edit="comment">' + escapeHtml(formatEmpty(column.comment)) + '</td>',
+          '<td class="control-cell"><select class="field-control" data-edit="key" ' + (canEdit ? '' : 'disabled') + '><option value=""></option><option value="primary"' + (column.isPrimaryKey ? ' selected' : '') + '>' + escapeHtml(labels.primaryKey) + '</option></select></td>',
+          '<td class="control-cell"><input class="field-control" data-edit="defaultValue" value="' + escapeAttribute(column.defaultValue || '') + '" ' + (canEdit ? '' : 'disabled') + '></td>',
+          '<td class="control-cell"><input class="field-control comment-control" data-edit="comment" value="' + escapeAttribute(column.comment || '') + '" ' + (canEdit ? '' : 'disabled') + '></td>',
           '</tr>'
         ].join('');
       }).join('');
@@ -1099,33 +1197,77 @@ export class TableSchemaPanel {
       updateToolbarState();
     }
 
+    function selectFieldRow(row) {
+      document.querySelectorAll('.field-row').forEach(item => item.classList.remove('selected'));
+      row.classList.add('selected');
+      selectedColumnId = row.dataset.id;
+      updateColumnInfo(selectedColumnId);
+      updateToolbarState();
+    }
+
+    function updateColumnNameReferences(previousName, nextName) {
+      if (previousName === nextName) return;
+      draftIndexes = draftIndexes.map(index => ({
+        ...index,
+        columns: index.columns.map(item => item === previousName ? nextName : item)
+      }));
+    }
+
+    function updateColumnFromControl(column, field, control) {
+      if (field === 'notNull') {
+        column.nullable = !control.checked;
+      } else if (field === 'autoIncrement') {
+        column.isAutoIncrement = control.checked;
+      } else if (field === 'key') {
+        column.isPrimaryKey = control.value === 'primary';
+        if (column.isPrimaryKey) column.nullable = false;
+      } else if (field === 'type') {
+        applyTypeInput(column, control.value);
+      } else if (field === 'name') {
+        const previousName = column.name;
+        column.name = control.value;
+        updateColumnNameReferences(previousName, column.name);
+      } else if (field === 'length' || field === 'decimals' || field === 'defaultValue' || field === 'comment') {
+        column[field] = control.value;
+      }
+    }
+
     function bindFieldRows() {
       document.querySelectorAll('.field-row').forEach(row => {
         row.addEventListener('click', () => {
-          document.querySelectorAll('.field-row').forEach(item => item.classList.remove('selected'));
-          row.classList.add('selected');
-          selectedColumnId = row.dataset.id;
-          updateColumnInfo(selectedColumnId);
-          updateToolbarState();
+          selectFieldRow(row);
         });
-        row.querySelectorAll('td[data-edit]').forEach(cell => {
-          cell.addEventListener('dblclick', event => {
-            event.stopPropagation();
-            startFieldEditor(row.dataset.id, cell);
-          });
-        });
-        row.querySelectorAll('input[type="checkbox"]').forEach(input => {
-          input.addEventListener('change', () => {
+        row.querySelectorAll('[data-edit]').forEach(control => {
+          control.addEventListener('focus', () => selectFieldRow(row));
+          const eventName = control.matches('input[type="text"], input:not([type]), input[type="search"]') ? 'input' : 'change';
+          control.addEventListener(eventName, () => {
             const column = draftColumns.find(item => item.id === row.dataset.id);
             if (!column) return;
-            if (input.dataset.edit === 'notNull') {
-              column.nullable = !input.checked;
-            } else if (input.dataset.edit === 'autoIncrement') {
-              column.isAutoIncrement = input.checked;
-            }
+            const field = control.dataset.edit;
+            updateColumnFromControl(column, field, control);
             markDirty();
             updateColumnInfo(column.id);
+            if (field === 'type' || field === 'key') {
+              renderFields();
+              renderIndexes();
+            }
           });
+          if (control.dataset.edit === 'length' || control.dataset.edit === 'decimals') {
+            control.addEventListener('blur', () => renderFields());
+          }
+          if (control.dataset.edit === 'name') {
+            control.addEventListener('blur', () => {
+              const column = draftColumns.find(item => item.id === row.dataset.id);
+              if (column) {
+                column.name = normalizeName(column.name);
+              }
+              renderFields();
+              renderIndexes();
+            });
+          }
+          if (control.dataset.edit === 'comment' || control.dataset.edit === 'defaultValue') {
+            control.addEventListener('blur', () => renderFields());
+          }
         });
       });
     }
@@ -1310,8 +1452,10 @@ export class TableSchemaPanel {
       if (index < 0 || nextIndex < 0 || nextIndex >= draftColumns.length) return;
       const [column] = draftColumns.splice(index, 1);
       draftColumns.splice(nextIndex, 0, column);
-      markDirty();
       renderFields();
+      const selectedRow = Array.from(document.querySelectorAll('.field-row')).find(row => row.dataset.id === selectedColumnId);
+      if (selectedRow) selectedRow.scrollIntoView({ block: 'nearest' });
+      markDirty();
     }
 
     function nextIndexName(columns) {
@@ -1363,6 +1507,7 @@ export class TableSchemaPanel {
         if (!column.nullable || column.isPrimaryKey) parts.push('NOT NULL');
         if (column.defaultValue) parts.push('DEFAULT ' + column.defaultValue);
         if (column.isAutoIncrement && (driverId === 'mysql' || driverId === 'mariadb')) parts.push('AUTO_INCREMENT');
+        if (column.comment && (driverId === 'mysql' || driverId === 'mariadb')) parts.push('COMMENT ' + sqlString(column.comment));
         return parts.join(' ');
       });
       const primaryKeys = draftColumns.filter(column => column.isPrimaryKey).map(column => quoteIdentifier(column.name));
@@ -1372,10 +1517,24 @@ export class TableSchemaPanel {
       const indexLines = draftIndexes
         .filter(index => !index.isPrimary && index.name && index.columns.length > 0)
         .map(index => 'CREATE ' + (index.isUnique ? 'UNIQUE ' : '') + 'INDEX ' + quoteIdentifier(index.name) + ' ON ' + getQualifiedName(tableName) + ' (' + index.columns.map(quoteIdentifier).join(', ') + ');');
+      const commentLines = [];
+      if (driverId === 'postgresql' || driverId === 'cockroachdb') {
+        if (getTableComment()) {
+          commentLines.push('COMMENT ON TABLE ' + getQualifiedName(tableName) + ' IS ' + sqlString(getTableComment()) + ';');
+        }
+        draftColumns.forEach(column => {
+          if (column.comment) {
+            commentLines.push('COMMENT ON COLUMN ' + getQualifiedName(tableName) + '.' + quoteIdentifier(column.name) + ' IS ' + sqlString(column.comment) + ';');
+          }
+        });
+      } else if ((driverId === 'mysql' || driverId === 'mariadb') && getTableComment()) {
+        commentLines.push('ALTER TABLE ' + getQualifiedName(tableName) + ' COMMENT = ' + sqlString(getTableComment()) + ';');
+      }
       preview.textContent = [
         'CREATE TABLE ' + getQualifiedName(tableName) + ' (',
         columnLines.join(',\\n') || '  -- add fields',
         ');',
+        ...commentLines,
         ...indexLines,
         ''
       ].join('\\n');
@@ -1434,6 +1593,11 @@ export class TableSchemaPanel {
       vscode.postMessage({ type: 'saveDesign', activeTab: getActiveTab(), draft });
     }
 
+    function cancelDesign() {
+      if (!canEdit) return;
+      vscode.postMessage({ type: 'reloadSchema', activeTab: getActiveTab() });
+    }
+
     document.querySelectorAll('.tab').forEach(tab => {
       tab.addEventListener('click', () => {
         activateTab(tab.dataset.tab);
@@ -1459,6 +1623,7 @@ export class TableSchemaPanel {
     document.getElementById('dropIndexButton')?.addEventListener('click', dropSelectedIndex);
     document.getElementById('dropIndexPanelButton')?.addEventListener('click', dropSelectedIndex);
     document.getElementById('saveDesignButton')?.addEventListener('click', saveDesign);
+    document.getElementById('cancelDesignButton')?.addEventListener('click', cancelDesign);
     document.getElementById('tableNameInput')?.addEventListener('input', () => {
       const sideTitle = document.querySelector('.side-title');
       if (sideTitle) sideTitle.textContent = getTableName();
@@ -1558,7 +1723,7 @@ function renderInfoSection(title: string, rows: Array<[string, unknown]>): strin
 }
 
 function getTypeParts(type: string): { baseType: string; length?: string; decimals?: string } {
-  const match = String(type).match(/^([a-zA-Z0-9_\s]+)(?:\(([^)]+)\))?/)
+  const match = String(type).match(/^([a-zA-Z0-9_\s]+?)(?:\(([^)]+)\))?$/)
   if (!match) {
     return { baseType: type }
   }

@@ -57,6 +57,13 @@ type TableDesignSaveRequest = {
   mode: 'design' | 'create'
 }
 
+type TableSchemaReloadRequest = {
+  profile: DbConnectionProfile
+  scope: SchemaScope
+  tableName: string
+  objectType: SchemaObject['type']
+}
+
 type TableSchemaTab = 'fields' | 'indexes' | 'foreignKeys' | 'checks' | 'triggers' | 'options' | 'comment' | 'sql'
 
 type QueryExecutionContext = {
@@ -1131,6 +1138,28 @@ export async function activate(context: ExtensionContext): Promise<void> {
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error)
         window.showErrorMessage(t(request.mode === 'create' ? 'table.createTableFailed' : 'table.saveDesignFailed', message))
+        return undefined
+      }
+    }),
+    commands.registerCommand('dbNexus.reloadTableSchema', async (request: TableSchemaReloadRequest): Promise<TableSchema | undefined> => {
+      if (!request || request.objectType !== 'table') {
+        window.showWarningMessage(t('table.selectTable'))
+        return undefined
+      }
+
+      const driver = driverRegistry.getDriver(request.profile.driverId)
+      if (!driver?.getTableSchema) {
+        window.showErrorMessage(t('table.schemaNotSupported'))
+        return undefined
+      }
+
+      try {
+        const schema = await driver.getTableSchema(request.profile, request.tableName, request.scope)
+        connectionsTreeProvider?.refreshTable(request.profile, request.tableName, request.scope)
+        return schema
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error)
+        window.showErrorMessage(t('table.schemaFailed', message))
         return undefined
       }
     }),
@@ -2825,14 +2854,15 @@ function buildAlterTableDesignSql(
     }
   }
 
-  for (const column of draft.columns) {
+  for (const [columnIndex, column] of draft.columns.entries()) {
     const originalColumn = column.originalName ? originalColumns.get(column.originalName) : undefined
+    const orderClause = buildColumnOrderClause(driverId, draft.columns, columnIndex)
     if (!originalColumn) {
-      statements.push(`ALTER TABLE ${qualifiedName} ADD COLUMN ${buildColumnDefinitionSql(driverId, column, true)};`)
+      statements.push(`ALTER TABLE ${qualifiedName} ADD COLUMN ${buildColumnDefinitionSql(driverId, column, true)}${orderClause};`)
       continue
     }
 
-    statements.push(...buildAlterColumnSql(driverId, qualifiedName, originalColumn, column))
+    statements.push(...buildAlterColumnSql(driverId, qualifiedName, originalColumn, column, columnIndex, orderClause))
   }
 
   if (primaryKeyChanged) {
@@ -2871,6 +2901,20 @@ function buildColumnDefinitionSql(
   return parts.join(' ')
 }
 
+function buildColumnOrderClause(
+  driverId: DatabaseDriverId,
+  columns: TableDesignDraft['columns'],
+  columnIndex: number
+): string {
+  if (driverId !== 'mysql' && driverId !== 'mariadb') {
+    return ''
+  }
+  if (columnIndex <= 0) {
+    return ' FIRST'
+  }
+  return ` AFTER ${quoteSqlIdentifier(driverId, columns[columnIndex - 1].name)}`
+}
+
 function composeColumnType(column: TableDesignDraft['columns'][number]): string {
   const baseType = String(column.type || '').trim() || 'varchar'
   const length = String(column.length || '').trim()
@@ -2888,7 +2932,9 @@ function buildAlterColumnSql(
   driverId: DatabaseDriverId,
   qualifiedName: string,
   originalColumn: TableColumn,
-  draftColumn: TableDesignDraft['columns'][number]
+  draftColumn: TableDesignDraft['columns'][number],
+  columnIndex: number,
+  orderClause: string
 ): string[] {
   const statements: string[] = []
   const oldName = draftColumn.originalName || originalColumn.name
@@ -2899,15 +2945,16 @@ function buildAlterColumnSql(
   const autoIncrementChanged = originalColumn.isAutoIncrement !== draftColumn.isAutoIncrement
   const commentChanged = String(originalColumn.comment || '') !== String(draftColumn.comment || '')
   const nameChanged = oldName !== newName
+  const orderChanged = supportsColumnOrderClause(driverId) && originalColumn.position !== columnIndex + 1
 
   if (driverId === 'mysql' || driverId === 'mariadb') {
-    if (nameChanged || typeChanged || nullableChanged || defaultChanged || autoIncrementChanged || commentChanged) {
+    if (nameChanged || typeChanged || nullableChanged || defaultChanged || autoIncrementChanged || commentChanged || orderChanged) {
       statements.push([
         'ALTER TABLE',
         qualifiedName,
         'CHANGE COLUMN',
         quoteSqlIdentifier(driverId, oldName),
-        buildColumnDefinitionSql(driverId, draftColumn, true)
+        `${buildColumnDefinitionSql(driverId, draftColumn, true)}${orderClause}`
       ].join(' ') + ';')
     }
     return statements
@@ -2930,6 +2977,10 @@ function buildAlterColumnSql(
     throw new Error(t('table.autoIncrementAlterNotSupported'))
   }
   return statements
+}
+
+function supportsColumnOrderClause(driverId: DatabaseDriverId): boolean {
+  return driverId === 'mysql' || driverId === 'mariadb'
 }
 
 function buildAlterColumnTypeSql(driverId: DatabaseDriverId, qualifiedName: string, columnName: string, columnType: string): string {

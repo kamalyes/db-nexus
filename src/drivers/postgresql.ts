@@ -416,6 +416,11 @@ export class PostgreSQLDriver implements DatabaseDriver {
       SELECT 
         c.column_name,
         c.data_type,
+        c.udt_name,
+        c.character_maximum_length,
+        c.numeric_precision,
+        c.numeric_scale,
+        c.datetime_precision,
         c.is_nullable,
         c.column_default,
         c.ordinal_position,
@@ -443,7 +448,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
 
     const columns: TableColumn[] = columnsResult.rows.map((row: Record<string, unknown>) => ({
       name: String(row.column_name),
-      type: String(row.data_type),
+      type: formatPostgresColumnType(row),
       nullable: row.is_nullable === 'YES',
       defaultValue: row.column_default ? String(row.column_default) : null,
       isPrimaryKey: Boolean(row.is_primary_key),
@@ -804,6 +809,40 @@ function numberOrUndefined(value: unknown): number | undefined {
 
   const numberValue = Number(value)
   return Number.isFinite(numberValue) ? numberValue : undefined
+}
+
+function formatPostgresColumnType(row: Record<string, unknown>): string {
+  const dataType = String(row.data_type || '')
+  const udtName = String(row.udt_name || '')
+  const characterLength = numberOrUndefined(row.character_maximum_length)
+  const numericPrecision = numberOrUndefined(row.numeric_precision)
+  const numericScale = numberOrUndefined(row.numeric_scale)
+  const datetimePrecision = numberOrUndefined(row.datetime_precision)
+
+  if (dataType === 'ARRAY') {
+    return udtName.startsWith('_') ? `${udtName.slice(1)}[]` : `${udtName}[]`
+  }
+  if (dataType === 'USER-DEFINED' && udtName) {
+    return udtName
+  }
+  if ((dataType === 'character varying' || dataType === 'varchar') && characterLength) {
+    return `varchar(${characterLength})`
+  }
+  if ((dataType === 'character' || dataType === 'char') && characterLength) {
+    return `char(${characterLength})`
+  }
+  if ((dataType === 'numeric' || dataType === 'decimal') && numericPrecision) {
+    return numericScale !== undefined
+      ? `${dataType}(${numericPrecision}, ${numericScale})`
+      : `${dataType}(${numericPrecision})`
+  }
+  if ((dataType === 'timestamp without time zone' || dataType === 'timestamp with time zone') && datetimePrecision !== undefined) {
+    return dataType.replace('timestamp', `timestamp(${datetimePrecision})`)
+  }
+  if ((dataType === 'time without time zone' || dataType === 'time with time zone') && datetimePrecision !== undefined) {
+    return dataType.replace('time', `time(${datetimePrecision})`)
+  }
+  return dataType
 }
 
 function quotePostgresIdentifier(value: string): string {
