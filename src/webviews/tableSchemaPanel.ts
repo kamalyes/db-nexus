@@ -209,9 +209,12 @@ export class TableSchemaPanel {
     const primaryKeys = schema.columns.filter(column => column.isPrimaryKey).map(column => column.name)
     const primaryKeyIconHtml = `<span class="pk-indicator" title="${escapeAttribute(t('table.primaryKey'))}">&#128273;</span>`
     const autoIncrementColumns = schema.columns.filter(column => column.isAutoIncrement).map(column => column.name)
-    const canResetAutoIncrement = canEdit
-      && (profile?.driverId === 'mysql' || profile?.driverId === 'mariadb')
-      && autoIncrementColumns.length > 0
+    const hasAutoIncrementTarget = autoIncrementColumns.length > 0
+      || metadata.autoIncrement !== undefined
+      || metadata.autoIncrementSequence !== undefined
+    const supportsAutoIncrementReset = profile?.driverId === 'mysql' || profile?.driverId === 'mariadb'
+    const showAutoIncrementReset = canEdit && (supportsAutoIncrementReset || hasAutoIncrementTarget)
+    const canResetAutoIncrement = canEdit && supportsAutoIncrementReset
     const autoIncrementValue = metadata.autoIncrement === undefined || metadata.autoIncrement === null ? '' : String(metadata.autoIncrement)
     const nullableColumns = schema.columns.filter(column => column.nullable).length
     const notNullColumns = schema.columns.length - nullableColumns
@@ -657,6 +660,11 @@ export class TableSchemaPanel {
       background: var(--vscode-button-secondaryBackground);
       color: var(--vscode-button-secondaryForeground);
     }
+    .option-hint {
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
     .status {
       margin-left: auto;
       color: var(--vscode-descriptionForeground);
@@ -847,13 +855,14 @@ export class TableSchemaPanel {
         <div class="tab-panel ${getActiveClass(initialTab, 'checks')}" id="tab-checks"><div class="empty">${t('table.notSupportedYet')}</div></div>
         <div class="tab-panel ${getActiveClass(initialTab, 'triggers')}" id="tab-triggers"><div class="empty">${t('table.notSupportedYet')}</div></div>
         <div class="tab-panel ${getActiveClass(initialTab, 'options')}" id="tab-options">
-          ${canResetAutoIncrement ? `
+          ${showAutoIncrementReset ? `
           <div class="option-editor">
             <label class="option-field">
               <span>${t('table.nextAutoIncrement')}</span>
-              <input id="autoIncrementValueInput" type="number" min="1" step="1" value="${escapeAttribute(autoIncrementValue)}" placeholder="1">
+              <input id="autoIncrementValueInput" type="number" min="1" step="1" value="${escapeAttribute(autoIncrementValue)}" placeholder="1" ${canResetAutoIncrement ? '' : 'disabled'}>
             </label>
-            <button class="tool option-action" id="resetAutoIncrementButton">${t('table.resetAutoIncrement')}</button>
+            <button class="tool option-action" id="resetAutoIncrementButton" ${canResetAutoIncrement ? '' : 'disabled'}>${t('table.resetAutoIncrement')}</button>
+            ${canResetAutoIncrement ? '' : `<span class="option-hint">${t('table.autoIncrementAlterNotSupported')}</span>`}
           </div>
           ` : ''}
           ${renderInfoSection('', [

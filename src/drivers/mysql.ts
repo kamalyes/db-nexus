@@ -341,7 +341,7 @@ export class MySQLDriver implements DatabaseDriver {
       nullable: row.IS_NULLABLE === 'YES',
       defaultValue: row.COLUMN_DEFAULT ? String(row.COLUMN_DEFAULT) : null,
       isPrimaryKey: Boolean(row.IS_PRIMARY_KEY),
-      isAutoIncrement: String(row.EXTRA || '').includes('auto_increment'),
+      isAutoIncrement: String(row.EXTRA || '').toLowerCase().includes('auto_increment'),
       comment: String(row.COLUMN_COMMENT || ''),
       position: Number(row.ORDINAL_POSITION)
     }))

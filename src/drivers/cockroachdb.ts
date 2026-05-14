@@ -112,6 +112,11 @@ export class CockroachDBDriver extends PostgreSQLDriver {
     const pool = await this.getPool(profile, database)
     const schema = scope.schema || await this.resolveCockroachTableSchema(pool, tableName)
 
+    tableSchema.columns = tableSchema.columns.map(column => ({
+      ...column,
+      isAutoIncrement: column.isAutoIncrement || isCockroachGeneratedIdDefault(column.defaultValue)
+    }))
+
     if (!schema) {
       return tableSchema
     }
@@ -258,4 +263,9 @@ function numberOrUndefined(value: unknown): number | undefined {
   }
   const numberValue = Number(value)
   return Number.isFinite(numberValue) ? numberValue : undefined
+}
+
+function isCockroachGeneratedIdDefault(value: unknown): boolean {
+  const defaultValue = String(value || '').toLowerCase()
+  return defaultValue.includes('nextval(') || defaultValue.includes('unique_rowid()')
 }
