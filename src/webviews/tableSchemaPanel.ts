@@ -184,6 +184,7 @@ export class TableSchemaPanel {
     const isCreateMode = mode === 'create'
     const canEdit = !!profile && objectType === 'table'
     const primaryKeys = schema.columns.filter(column => column.isPrimaryKey).map(column => column.name)
+    const primaryKeyIconHtml = `<span class="pk-indicator" title="${escapeAttribute(t('table.primaryKey'))}">&#128273;</span>`
     const autoIncrementColumns = schema.columns.filter(column => column.isAutoIncrement).map(column => column.name)
     const nullableColumns = schema.columns.filter(column => column.nullable).length
     const notNullColumns = schema.columns.length - nullableColumns
@@ -227,22 +228,31 @@ export class TableSchemaPanel {
         position: column.position
       }
     })
-    const designIndexes = schema.indexes.map((index, indexPosition) => ({
+    let designIndexes = schema.indexes.map((index, indexPosition) => ({
       id: `idx_${indexPosition}_${index.name}`,
       originalName: isCreateMode ? undefined : index.name,
       name: index.name,
-      columns: index.columns,
+      columns: [...index.columns],
       isUnique: index.isUnique,
       isPrimary: index.isPrimary,
       type: index.type || ''
     }))
+    if (primaryKeys.length > 0 && !designIndexes.some(index => index.isPrimary)) {
+      designIndexes = [{
+        id: `idx_pk_${schema.name}`,
+        originalName: undefined,
+        name: `pk_${schema.name || 'table'}`,
+        columns: primaryKeys,
+        isUnique: true,
+        isPrimary: true,
+        type: t('table.primaryKey')
+      }, ...designIndexes]
+    }
 
     const fieldRowsHtml = schema.columns.map((column, index) => {
       const typeParts = getTypeParts(column.type)
       const keyLabel = column.isPrimaryKey ? `PK ${primaryKeys.indexOf(column.name) + 1}` : ''
-      const keyBadge = column.isPrimaryKey
-        ? `<span class="pk-indicator" title="${escapeAttribute(t('table.primaryKey'))}">PK</span>`
-        : ''
+      const keyBadge = column.isPrimaryKey ? primaryKeyIconHtml : ''
       return `
         <tr class="field-row ${index === 0 ? 'selected' : ''}" data-column="${escapeAttribute(column.name)}" data-id="${escapeAttribute(designColumns[index].id)}">
           <td class="order-cell">${index + 1}</td>
@@ -259,14 +269,19 @@ export class TableSchemaPanel {
       `
     }).join('')
 
-    const indexRowsHtml = schema.indexes.map((index, indexPosition) => `
-      <tr class="index-row ${index.name === selectedIndexName ? 'selected' : ''}" data-index="${escapeAttribute(index.name)}" data-id="${escapeAttribute(designIndexes[indexPosition].id)}">
-        <td data-edit="name">${escapeHtml(index.name)}</td>
-        <td data-edit="columns">${escapeHtml(index.columns.join(', '))}</td>
-        <td class="check-cell"><input data-edit="isUnique" type="checkbox" ${canEdit && !index.isPrimary ? '' : 'disabled'} ${index.isUnique ? 'checked' : ''}></td>
-        <td data-edit="type">${index.isPrimary ? t('table.primaryKey') : escapeHtml(index.type || '')}</td>
-      </tr>
-    `).join('')
+    const indexRowsHtml = designIndexes.map(index => {
+      const typeHtml = index.isPrimary
+        ? `${primaryKeyIconHtml}<span class="key-text">${escapeHtml(t('table.primaryKey'))}</span>`
+        : escapeHtml(index.type || '')
+      return `
+        <tr class="index-row ${index.name === selectedIndexName ? 'selected' : ''}" data-index="${escapeAttribute(index.name)}" data-id="${escapeAttribute(index.id)}">
+          <td data-edit="name">${escapeHtml(index.name)}</td>
+          <td data-edit="columns">${escapeHtml(index.columns.join(', '))}</td>
+          <td class="check-cell"><input data-edit="isUnique" type="checkbox" ${canEdit && !index.isPrimary ? '' : 'disabled'} ${index.isUnique ? 'checked' : ''}></td>
+          <td data-edit="type">${typeHtml}</td>
+        </tr>
+      `
+    }).join('')
 
     const foreignKeyRowsHtml = schema.foreignKeys.map(foreignKey => `
       <tr>
@@ -583,13 +598,6 @@ export class TableSchemaPanel {
       min-height: 120px;
       resize: vertical;
     }
-    .panel-actions {
-      display: flex;
-      gap: 8px;
-      padding: 8px 10px;
-      border-bottom: 1px solid var(--vscode-panel-border);
-      background: var(--vscode-sideBar-background);
-    }
     .status {
       margin-left: auto;
       color: var(--vscode-descriptionForeground);
@@ -707,7 +715,7 @@ export class TableSchemaPanel {
         <button class="tool" id="insertColumnButton" ${canEdit ? '' : 'disabled'}>${t('table.insertColumnAction')}</button>
         <button class="tool" id="dropColumnButton" ${canEdit && schema.columns.length > 0 ? '' : 'disabled'}>${t('table.dropColumnAction')}</button>
         <button class="tool" id="addIndexButton" ${canEdit ? '' : 'disabled'}>${t('table.addIndexAction')}</button>
-        <button class="tool" id="dropIndexButton" ${canEdit && schema.indexes.some(index => !index.isPrimary) ? '' : 'disabled'}>${t('table.dropIndexAction')}</button>
+        <button class="tool" id="dropIndexButton" ${canEdit && designIndexes.length > 0 ? '' : 'disabled'}>${t('table.dropIndexAction')}</button>
         <button class="tool" id="moveUpButton" ${canEdit && schema.columns.length > 1 ? '' : 'disabled'}>${t('table.moveUp')}</button>
         <button class="tool" id="moveDownButton" ${canEdit && schema.columns.length > 1 ? '' : 'disabled'}>${t('table.moveDown')}</button>
         <span class="status" id="designStatus">${isCreateMode ? t('table.unsavedDesign') : t('table.noPendingChanges')}</span>
@@ -746,10 +754,6 @@ export class TableSchemaPanel {
         </div>
 
         <div class="tab-panel ${getActiveClass(initialTab, 'indexes')}" id="tab-indexes">
-          <div class="panel-actions">
-            <button class="tool" id="addIndexPanelButton" ${canEdit ? '' : 'disabled'}>${t('table.addIndexAction')}</button>
-            <button class="tool" id="dropIndexPanelButton" ${canEdit && schema.indexes.some(index => !index.isPrimary) ? '' : 'disabled'}>${t('table.dropIndexAction')}</button>
-          </div>
           <table>
             <thead>
               <tr>
@@ -761,7 +765,7 @@ export class TableSchemaPanel {
             </thead>
             <tbody id="indexesBody">${indexRowsHtml}</tbody>
           </table>
-          <div class="empty" id="noIndexesMessage" ${schema.indexes.length > 0 ? 'hidden' : ''}>${t('table.noIndexes')}</div>
+          <div class="empty" id="noIndexesMessage" ${designIndexes.length > 0 ? 'hidden' : ''}>${t('table.noIndexes')}</div>
         </div>
 
         <div class="tab-panel ${getActiveClass(initialTab, 'foreignKeys')}" id="tab-foreignKeys">
@@ -1114,8 +1118,66 @@ export class TableSchemaPanel {
       return document.querySelector('.tab.active')?.dataset.tab || initialTab;
     }
 
-    function keyText(column) {
-      return column.isPrimaryKey ? labels.primaryKey : '';
+    function primaryKeyIconHtml() {
+      return '<span class="pk-indicator" title="' + escapeAttribute(labels.primaryKey) + '">&#128273;</span>';
+    }
+
+    function primaryIndexTypeHtml() {
+      return primaryKeyIconHtml() + '<span class="key-text">' + escapeHtml(labels.primaryKey) + '</span>';
+    }
+
+    function primaryColumnNames() {
+      return draftColumns
+        .filter(column => column.isPrimaryKey)
+        .map(column => column.name)
+        .filter(Boolean);
+    }
+
+    function generatedPrimaryIndexName() {
+      const normalized = normalizeName(getTableName()).replace(/[^A-Za-z0-9_$]+/g, '_').replace(/^_+|_+$/g, '');
+      return 'pk_' + (normalized || 'table');
+    }
+
+    function syncPrimaryIndexFromColumns(selectCreatedIndex) {
+      const columns = primaryColumnNames();
+      const primaryIndexes = draftIndexes.filter(index => index.isPrimary);
+      const primaryIndex = primaryIndexes[0];
+
+      if (columns.length === 0) {
+        if (primaryIndexes.length > 0) {
+          draftIndexes = draftIndexes.filter(index => !index.isPrimary);
+          if (primaryIndexes.some(index => index.id === selectedIndexId)) {
+            selectedIndexId = draftIndexes[0]?.id || null;
+          }
+        }
+        return;
+      }
+
+      if (primaryIndex) {
+        draftIndexes = draftIndexes.filter(index => !index.isPrimary || index.id === primaryIndex.id);
+        primaryIndex.name = primaryIndex.name || generatedPrimaryIndexName();
+        primaryIndex.columns = columns;
+        primaryIndex.isUnique = true;
+        primaryIndex.isPrimary = true;
+        primaryIndex.type = labels.primaryKey;
+        if (primaryIndexes.some(index => index.id === selectedIndexId && index.id !== primaryIndex.id)) {
+          selectedIndexId = primaryIndex.id;
+        }
+        return;
+      }
+
+      const index = {
+        id: nextId('idx'),
+        name: generatedPrimaryIndexName(),
+        columns,
+        isUnique: true,
+        isPrimary: true,
+        type: labels.primaryKey
+      };
+      draftIndexes.unshift(index);
+      if (selectCreatedIndex) {
+        selectedIndexId = index.id;
+      }
     }
 
     function getColumnInfo(column) {
@@ -1164,14 +1226,11 @@ export class TableSchemaPanel {
       if (moveDownButton) {
         moveDownButton.disabled = !canEdit || columnIndex < 0 || columnIndex >= draftColumns.length - 1;
       }
-      const hasDroppableIndex = draftIndexes.some(index => !index.isPrimary);
-      ['dropIndexButton', 'dropIndexPanelButton'].forEach(id => {
-        const button = document.getElementById(id);
-        if (button) {
-          const selectedIndex = draftIndexes.find(index => index.id === selectedIndexId);
-          button.disabled = !canEdit || !hasDroppableIndex || !selectedIndex || selectedIndex.isPrimary;
-        }
-      });
+      const dropIndexButton = document.getElementById('dropIndexButton');
+      if (dropIndexButton) {
+        const selectedIndex = draftIndexes.find(index => index.id === selectedIndexId);
+        dropIndexButton.disabled = !canEdit || draftIndexes.length === 0 || !selectedIndex;
+      }
     }
 
     function markDirty() {
@@ -1187,7 +1246,7 @@ export class TableSchemaPanel {
       body.innerHTML = draftColumns.map((column, index) => {
         const selected = column.id === selectedColumnId ? 'selected' : '';
         const dirtyClass = column.originalName ? '' : 'dirty';
-        const keyBadge = column.isPrimaryKey ? '<span class="pk-indicator" title="' + escapeAttribute(labels.primaryKey) + '">PK</span>' : '';
+        const keyBadge = column.isPrimaryKey ? primaryKeyIconHtml() : '';
         return [
           '<tr class="field-row ' + selected + ' ' + dirtyClass + '" data-column="' + escapeAttribute(column.name) + '" data-id="' + escapeAttribute(column.id) + '">',
           '<td class="order-cell">' + (index + 1) + '</td>',
@@ -1214,12 +1273,13 @@ export class TableSchemaPanel {
       body.innerHTML = draftIndexes.map(index => {
         const selected = index.id === selectedIndexId ? 'selected' : '';
         const dirtyClass = index.originalName ? '' : 'dirty';
+        const typeHtml = index.isPrimary ? primaryIndexTypeHtml() : escapeHtml(index.type || '');
         return [
           '<tr class="index-row ' + selected + ' ' + dirtyClass + '" data-index="' + escapeAttribute(index.name) + '" data-id="' + escapeAttribute(index.id) + '">',
           '<td class="' + (canEdit && !index.isPrimary ? 'editable' : '') + '" data-edit="name">' + escapeHtml(index.name) + '</td>',
           '<td class="' + (canEdit && !index.isPrimary ? 'editable' : '') + '" data-edit="columns">' + escapeHtml(index.columns.join(', ')) + '</td>',
           '<td class="check-cell"><input data-edit="isUnique" type="checkbox" ' + (canEdit && !index.isPrimary ? '' : 'disabled') + (index.isUnique ? ' checked' : '') + '></td>',
-          '<td class="' + (canEdit && !index.isPrimary ? 'editable' : '') + '" data-edit="type">' + escapeHtml(index.isPrimary ? labels.primaryKey : (index.type || '')) + '</td>',
+          '<td class="' + (canEdit && !index.isPrimary ? 'editable' : '') + '" data-edit="type">' + typeHtml + '</td>',
           '</tr>'
         ].join('');
       }).join('');
@@ -1255,12 +1315,14 @@ export class TableSchemaPanel {
       } else if (field === 'key') {
         column.isPrimaryKey = control.value === 'primary';
         if (column.isPrimaryKey) column.nullable = false;
+        syncPrimaryIndexFromColumns(false);
       } else if (field === 'type') {
         applyTypeInput(column, control.value);
       } else if (field === 'name') {
         const previousName = column.name;
         column.name = control.value;
         updateColumnNameReferences(previousName, column.name);
+        syncPrimaryIndexFromColumns(false);
       } else if (field === 'length' || field === 'decimals' || field === 'defaultValue' || field === 'comment') {
         column[field] = control.value;
       }
@@ -1293,7 +1355,10 @@ export class TableSchemaPanel {
             control.addEventListener('blur', () => {
               const column = draftColumns.find(item => item.id === row.dataset.id);
               if (column) {
+                const previousName = column.name;
                 column.name = normalizeName(column.name);
+                updateColumnNameReferences(previousName, column.name);
+                syncPrimaryIndexFromColumns(false);
               }
               renderFields();
               renderIndexes();
@@ -1364,6 +1429,7 @@ export class TableSchemaPanel {
           if (field === 'key') {
             column.isPrimaryKey = editor.value === 'primary';
             if (column.isPrimaryKey) column.nullable = false;
+            syncPrimaryIndexFromColumns(false);
           } else if (field === 'name' || field === 'type' || field === 'length' || field === 'decimals' || field === 'defaultValue' || field === 'comment') {
             const previousName = column.name;
             if (field === 'type') {
@@ -1372,10 +1438,8 @@ export class TableSchemaPanel {
               column[field] = editor.value.trim();
             }
             if (field === 'name' && previousName !== column.name) {
-              draftIndexes = draftIndexes.map(index => ({
-                ...index,
-                columns: index.columns.map(item => item === previousName ? column.name : item)
-              }));
+              updateColumnNameReferences(previousName, column.name);
+              syncPrimaryIndexFromColumns(false);
             }
           }
           markDirty();
@@ -1473,7 +1537,8 @@ export class TableSchemaPanel {
       draftColumns.splice(index, 1);
       draftIndexes = draftIndexes
         .map(item => ({ ...item, columns: item.columns.filter(column => column !== removed.name) }))
-        .filter(item => item.isPrimary || item.columns.length > 0);
+        .filter(item => item.columns.length > 0);
+      syncPrimaryIndexFromColumns(false);
       selectedColumnId = draftColumns[Math.min(index, draftColumns.length - 1)]?.id || null;
       markDirty();
       renderFields();
@@ -1486,6 +1551,7 @@ export class TableSchemaPanel {
       if (index < 0 || nextIndex < 0 || nextIndex >= draftColumns.length) return;
       const [column] = draftColumns.splice(index, 1);
       draftColumns.splice(nextIndex, 0, column);
+      syncPrimaryIndexFromColumns(false);
       renderFields();
       const selectedRow = Array.from(document.querySelectorAll('.field-row')).find(row => row.dataset.id === selectedColumnId);
       if (selectedRow) selectedRow.scrollIntoView({ block: 'nearest' });
@@ -1525,10 +1591,17 @@ export class TableSchemaPanel {
 
     function dropSelectedIndex() {
       const index = draftIndexes.findIndex(item => item.id === selectedIndexId);
-      if (index < 0 || draftIndexes[index].isPrimary) return;
+      if (index < 0) return;
+      const removed = draftIndexes[index];
+      if (removed.isPrimary) {
+        draftColumns.forEach(column => {
+          column.isPrimaryKey = false;
+        });
+      }
       draftIndexes.splice(index, 1);
       selectedIndexId = draftIndexes[Math.min(index, draftIndexes.length - 1)]?.id || null;
       markDirty();
+      renderFields();
       renderIndexes();
     }
 
@@ -1610,6 +1683,7 @@ export class TableSchemaPanel {
         alert(validationMessage);
         return;
       }
+      syncPrimaryIndexFromColumns(false);
       const draft = {
         tableName: getTableName(),
         comment: getTableComment(),
@@ -1655,9 +1729,7 @@ export class TableSchemaPanel {
     document.getElementById('moveUpButton')?.addEventListener('click', () => moveSelectedColumn(-1));
     document.getElementById('moveDownButton')?.addEventListener('click', () => moveSelectedColumn(1));
     document.getElementById('addIndexButton')?.addEventListener('click', addIndex);
-    document.getElementById('addIndexPanelButton')?.addEventListener('click', addIndex);
     document.getElementById('dropIndexButton')?.addEventListener('click', dropSelectedIndex);
-    document.getElementById('dropIndexPanelButton')?.addEventListener('click', dropSelectedIndex);
     document.getElementById('saveDesignButton')?.addEventListener('click', saveDesign);
     document.getElementById('cancelDesignButton')?.addEventListener('click', cancelDesign);
     document.getElementById('tableNameInput')?.addEventListener('input', () => {

@@ -439,7 +439,7 @@ export class TableDataPanel {
       return `
         <th class="sortable" data-column="${this._escapeAttr(column)}" data-col-index="${index}">
           <div class="header-content">
-            <span>${isPk ? '<span class="pk-indicator" title="Primary Key">PK</span> ' : ''}${this._escapeHtml(column)}</span>
+            <span>${isPk ? '<span class="pk-indicator" title="Primary Key">&#128273; PK</span> ' : ''}${this._escapeHtml(column)}</span>
             <span class="sort-icon">${sortLabel}</span>
           </div>
           <span class="col-resizer" data-col-index="${index}"></span>
@@ -1316,7 +1316,7 @@ export class TableDataPanel {
             const isPk = primaryKeyColumns.includes(c)
             const sort = this._sorts.find(s => s.column === c)
             return `<th class="sortable ${sort ? 'sorted' : ''}" data-column="${c}">
-              ${isPk ? '<span class="pk-indicator" title="Primary Key">🔑</span> ' : ''}${c}
+              ${isPk ? '<span class="pk-indicator" title="Primary Key">&#128273;</span> ' : ''}${c}
               <span class="sort-icon">${sort ? (sort.direction === 'ASC' ? '▲' : '▼') : '↕'}</span>
             </th>`
           }).join('')}
@@ -1582,7 +1582,7 @@ export class TableDataPanel {
     const headerCells = columns.map(column => {
       const sort = this._sorts.find(item => item.column === column)
       const sortText = sort ? sort.direction : ''
-      const pk = primaryKeyColumns.includes(column) ? '<span class="pk-indicator" title="Primary Key">PK</span> ' : ''
+      const pk = primaryKeyColumns.includes(column) ? '<span class="pk-indicator" title="Primary Key">&#128273; PK</span> ' : ''
       return `<th class="sortable" data-column="${this._escapeAttr(column)}">
         <div class="th-content"><span>${pk}${this._escapeHtml(column)}</span><span class="sort-icon">${sortText}</span></div>
         <span class="column-resize-handle" title="Resize column"></span>

@@ -567,7 +567,10 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
     return parts.join('\n')
   }
 
-  private getFieldIcon(node: FieldNode): { dark: Uri; light: Uri } {
+  private getFieldIcon(node: FieldNode): ThemeIcon | { dark: Uri; light: Uri } {
+    if (node.column.isPrimaryKey) {
+      return new ThemeIcon('key', new ThemeColor('charts.yellow'))
+    }
     const constraintType = node.getConstraintType()
     return {
       dark: Uri.file(path.join(this.extensionPath, 'resources', 'icons', 'dark', `${constraintType}.svg`)),
