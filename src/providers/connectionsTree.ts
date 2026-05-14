@@ -411,6 +411,12 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
         title: 'Open Table Data',
         arguments: [node]
       }
+    } else if (node.collapsibleState !== TreeItemCollapsibleState.None) {
+      item.command = {
+        command: 'dbNexus.keepTreeContainerExpanded',
+        title: 'Keep Container Expanded',
+        arguments: [node]
+      }
     }
     
     return item
@@ -436,6 +442,11 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
     item.tooltip = t('table.openTableList')
     item.iconPath = this.getIconUri('table')
     item.contextValue = 'tables.group'
+    item.command = {
+      command: 'dbNexus.keepTreeContainerExpanded',
+      title: 'Keep Container Expanded',
+      arguments: [node]
+    }
     return item
   }
 

@@ -849,6 +849,19 @@ export async function activate(context: ExtensionContext): Promise<void> {
     await revealConnectionInTree(profile)
   }
 
+  const keepTreeContainerExpanded = async (
+    node: SchemaNode | TablesGroupNode | undefined
+  ): Promise<void> => {
+    if (!node || !connectionsTreeView || !isListOpenModeDoubleClick()) return
+
+    await new Promise(resolve => setTimeout(resolve, 75))
+    await connectionsTreeView.reveal(node, {
+      focus: false,
+      select: false,
+      expand: true
+    }).then(undefined, () => undefined)
+  }
+
   context.subscriptions.push(
     outputChannel,
     connectionsTreeView,
@@ -863,6 +876,9 @@ export async function activate(context: ExtensionContext): Promise<void> {
     }),
     commands.registerCommand('dbNexus.openDatabase', async (target?: ConnectionNode | DbConnectionProfile | string) => {
       await openDatabase(target)
+    }),
+    commands.registerCommand('dbNexus.keepTreeContainerExpanded', async (node: SchemaNode | TablesGroupNode | undefined) => {
+      await keepTreeContainerExpanded(node)
     }),
     commands.registerCommand('dbNexus.addConnectionFromUrl', async (connectionUrl?: string) => {
       await addConnectionFromUrl(connectionUrl)
