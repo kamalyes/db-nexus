@@ -326,6 +326,7 @@ export class MySQLDriver implements DatabaseDriver {
         JOIN information_schema.KEY_COLUMN_USAGE ku 
           ON tc.CONSTRAINT_NAME = ku.CONSTRAINT_NAME 
           AND tc.TABLE_SCHEMA = ku.TABLE_SCHEMA
+          AND tc.TABLE_NAME = ku.TABLE_NAME
         WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
       ) pk ON c.COLUMN_NAME = pk.COLUMN_NAME 
         AND c.TABLE_NAME = pk.TABLE_NAME 
@@ -473,7 +474,6 @@ export class MySQLDriver implements DatabaseDriver {
     }
 
     const setColumns = Object.keys(row)
-      .filter(k => !primaryKeyColumns.includes(k))
     const setClauses = setColumns
       .map(k => `\`${k}\` = ?`)
       .join(', ')

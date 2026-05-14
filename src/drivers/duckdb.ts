@@ -338,14 +338,19 @@ export class DuckDBDriver implements DatabaseDriver {
     row: Record<string, unknown>,
     scope: SchemaScope
   ): Promise<MutationPlan> {
-    const columns = Object.keys(row).join(', ')
-    const params = Object.keys(row).map(() => '?').join(', ')
-    const sql = `INSERT INTO ${table} (${columns}) VALUES (${params})`
+    const qualifiedTable = getDuckQualifiedTableName(table, scope)
+    const rowColumns = Object.keys(row)
+    const columns = rowColumns.map(quoteDuckIdentifier).join(', ')
+    const params = rowColumns.map(() => '?').join(', ')
+    const sql = rowColumns.length === 0
+      ? `INSERT INTO ${qualifiedTable} DEFAULT VALUES`
+      : `INSERT INTO ${qualifiedTable} (${columns}) VALUES (${params})`
 
     return {
       table,
       type: 'insert',
       sql,
+      parameters: Object.values(row),
       description: `Insert new row into ${table}`
     }
   }
@@ -357,6 +362,7 @@ export class DuckDBDriver implements DatabaseDriver {
     originalRow: Record<string, unknown>,
     scope: SchemaScope
   ): Promise<MutationPlan> {
+    const qualifiedTable = getDuckQualifiedTableName(table, scope)
     const tableSchema = await this.getTableSchema(profile, table, scope)
     const primaryKeyColumns = tableSchema.columns.filter(c => c.isPrimaryKey).map(c => c.name)
 
@@ -364,18 +370,22 @@ export class DuckDBDriver implements DatabaseDriver {
       throw new Error('Cannot update table without primary key')
     }
 
-    const setClauses = Object.keys(row)
-      .filter(k => !primaryKeyColumns.includes(k))
-      .map(k => `${k} = ?`)
+    const setColumns = Object.keys(row)
+    const setClauses = setColumns
+      .map(k => `${quoteDuckIdentifier(k)} = ?`)
       .join(', ')
 
-    const whereClauses = primaryKeyColumns.map(k => `${k} = ?`).join(' AND ')
-    const sql = `UPDATE ${table} SET ${setClauses} WHERE ${whereClauses}`
+    const whereClauses = primaryKeyColumns.map(k => `${quoteDuckIdentifier(k)} = ?`).join(' AND ')
+    const sql = `UPDATE ${qualifiedTable} SET ${setClauses} WHERE ${whereClauses}`
 
     return {
       table,
       type: 'update',
       sql,
+      parameters: [
+        ...setColumns.map(column => row[column]),
+        ...primaryKeyColumns.map(column => originalRow[column])
+      ],
       description: `Update row in ${table}`
     }
   }
@@ -386,6 +396,7 @@ export class DuckDBDriver implements DatabaseDriver {
     row: Record<string, unknown>,
     scope: SchemaScope
   ): Promise<MutationPlan> {
+    const qualifiedTable = getDuckQualifiedTableName(table, scope)
     const tableSchema = await this.getTableSchema(profile, table, scope)
     const primaryKeyColumns = tableSchema.columns.filter(c => c.isPrimaryKey).map(c => c.name)
 
@@ -393,13 +404,14 @@ export class DuckDBDriver implements DatabaseDriver {
       throw new Error('Cannot delete from table without primary key')
     }
 
-    const whereClauses = primaryKeyColumns.map(k => `${k} = ?`).join(' AND ')
-    const sql = `DELETE FROM ${table} WHERE ${whereClauses}`
+    const whereClauses = primaryKeyColumns.map(k => `${quoteDuckIdentifier(k)} = ?`).join(' AND ')
+    const sql = `DELETE FROM ${qualifiedTable} WHERE ${whereClauses}`
 
     return {
       table,
       type: 'delete',
       sql,
+      parameters: primaryKeyColumns.map(column => row[column]),
       description: `Delete row from ${table}`
     }
   }
@@ -409,19 +421,21 @@ export class DuckDBDriver implements DatabaseDriver {
     plan: MutationPlan
   ): Promise<DataEditResult> {
     const conn = await this.getConnection(profile)
+    const params = plan.parameters || []
+    const interpolatedSql = params.reduce<string>((sql, value) => sql.replace('?', formatDuckValue(value)), plan.sql)
 
     try {
-      await conn.execute(plan.sql)
+      await conn.execute(interpolatedSql)
       return {
         success: true,
-        sqlPreview: plan.sql,
+        sqlPreview: interpolatedSql,
         affectedRows: 1,
         message: `Row ${plan.type}ed`
       }
     } catch (error) {
       return {
         success: false,
-        sqlPreview: plan.sql,
+        sqlPreview: interpolatedSql,
         affectedRows: 0,
         error: error instanceof Error ? error.message : String(error)
       }

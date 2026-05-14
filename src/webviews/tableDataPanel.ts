@@ -431,12 +431,18 @@ export class TableDataPanel {
 </head>
 <body>
   <div class="error">${this._escapeHtml(error)}</div>
-  <button class="retry-btn" onclick="retry()">${t('common.retry') || 'Retry'}</button>
+  <button class="retry-btn" onclick="refresh()">${t('common.refresh') || 'Refresh'}</button>
   <script>
     const vscode = acquireVsCodeApi();
-    function retry() {
+    function refresh() {
       vscode.postMessage({ type: 'refresh' });
     }
+    window.addEventListener('keydown', event => {
+      if (event.key === 'F5') {
+        event.preventDefault();
+        refresh();
+      }
+    });
   </script>
 </body>
 </html>`
@@ -468,11 +474,8 @@ export class TableDataPanel {
       .filter(column => !column.isAutoIncrement)
       .map(column => column.name)
     const defaultColumnWidth = 180
-    const actionColumnWidth = 44
-    const actionColumnVisible = canEdit || canDelete
 
     const colgroup = [
-      actionColumnVisible ? `<col style="width: ${actionColumnWidth}px">` : '',
       ...columns.map((column, index) => `<col data-col-index="${index}" style="width: ${defaultColumnWidth}px">`)
     ].join('')
 
@@ -493,21 +496,19 @@ export class TableDataPanel {
 
     const bodyRows = rows.length > 0 ? rows.map((row, rowIndex) => `
       <tr data-row-index="${rowIndex}">
-        ${actionColumnVisible ? `<td class="row-state" title="Row status"><span class="row-marker"></span></td>` : ''}
         ${columns.map((column, columnIndex) => {
           const value = row[column]
           const raw = value === null || value === undefined ? '' : String(value)
           const displayValue = value === null || value === undefined
             ? '<span class="null-value">NULL</span>'
             : this._escapeHtml(raw)
-          const readonly = primaryKeyColumns.includes(column) ? ' readonly-cell' : ''
           const rowHandle = columnIndex === 0 ? '<span class="row-resizer" title="Resize row"></span>' : ''
-          return `<td class="data-cell${readonly}" data-row-index="${rowIndex}" data-column="${this._escapeAttr(column)}" data-raw="${this._escapeAttr(raw)}">${displayValue}${rowHandle}</td>`
+          return `<td class="data-cell" data-row-index="${rowIndex}" data-column="${this._escapeAttr(column)}" data-raw="${this._escapeAttr(raw)}">${displayValue}${rowHandle}</td>`
         }).join('')}
       </tr>
     `).join('') : `
       <tr class="empty-row">
-        <td class="empty-cell" colspan="${Math.max(1, columns.length + (actionColumnVisible ? 1 : 0))}">No rows on this page</td>
+        <td class="empty-cell" colspan="${Math.max(1, columns.length)}">No rows on this page</td>
       </tr>
     `
 
@@ -718,13 +719,7 @@ export class TableDataPanel {
       background: var(--vscode-editor-background);
     }
     .data-cell {
-      cursor: default;
-    }
-    .data-cell:not(.readonly-cell) {
       cursor: cell;
-    }
-    .data-cell.readonly-cell {
-      color: var(--vscode-descriptionForeground);
     }
     .data-cell.dirty {
       background: var(--vscode-editor-inactiveSelectionBackground);
@@ -741,15 +736,14 @@ export class TableDataPanel {
       color: var(--vscode-input-foreground);
       background: var(--vscode-input-background);
     }
-    .row-state {
-      width: ${actionColumnWidth}px;
-      text-align: center;
-      color: var(--vscode-descriptionForeground);
-    }
-    tr.row-dirty .row-marker::before {
-      content: "*";
-      color: var(--vscode-textLink-foreground);
-      font-weight: 700;
+    tr.row-dirty td:first-child::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 3px;
+      background: var(--vscode-textLink-foreground);
     }
     .null-value {
       color: var(--vscode-descriptionForeground);
@@ -809,7 +803,7 @@ export class TableDataPanel {
 </head>
 <body>
   <div class="toolbar">
-    <button id="refreshBtn" class="secondary">${this._escapeHtml(t('common.retry'))}</button>
+    <button id="refreshBtn" class="secondary" title="F5">${this._escapeHtml(t('common.refresh'))}</button>
     ${canInsert ? '<button id="addRowBtn">New Row</button>' : ''}
     ${canDelete ? '<button id="deleteRowBtn" class="secondary" disabled>Delete Row</button>' : ''}
     <div class="stats">${this._escapeHtml(statsText)} / ${this._escapeHtml(pageInfo)}</div>
@@ -843,7 +837,6 @@ export class TableDataPanel {
       <colgroup>${colgroup}</colgroup>
       <thead>
         <tr>
-          ${actionColumnVisible ? '<th></th>' : ''}
           ${headers}
         </tr>
       </thead>
@@ -887,6 +880,12 @@ export class TableDataPanel {
 
     document.getElementById('refreshBtn').addEventListener('click', () => {
       vscode.postMessage({ type: 'refresh' });
+    });
+    window.addEventListener('keydown', event => {
+      if (event.key === 'F5') {
+        event.preventDefault();
+        vscode.postMessage({ type: 'refresh' });
+      }
     });
 
     function updateSelectedRowState() {
@@ -995,7 +994,7 @@ export class TableDataPanel {
     }
 
     function startCellEdit(cell) {
-      if (!canEdit || cell.classList.contains('readonly-cell') || cell.querySelector('input')) return;
+      if (!canEdit || cell.querySelector('input')) return;
       const rowIndex = Number(cell.dataset.rowIndex);
       const column = cell.dataset.column;
       const pending = pendingUpdates.get(rowIndex);

@@ -176,7 +176,7 @@ export class TableSchemaPanel {
     const scope = panelContext.scope || {}
     const objectType = panelContext.objectType || 'table'
     const metadata = schema.metadata || {}
-    const tableComment = String(schema.comment ?? metadata.comment ?? '')
+    const tableComment = String(schema.comment || metadata.comment || '')
     const qualifiedName = getQualifiedName(profile, scope, schema.name)
     const initialTab = panelContext.initialTab || 'fields'
     const selectedIndexName = panelContext.selectedIndexName
@@ -598,6 +598,11 @@ export class TableSchemaPanel {
       min-height: 120px;
       resize: vertical;
     }
+    .comment-label {
+      margin: 0 0 8px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+    }
     .status {
       margin-left: auto;
       color: var(--vscode-descriptionForeground);
@@ -798,10 +803,11 @@ export class TableSchemaPanel {
           ])}
         </div>
         <div class="tab-panel ${getActiveClass(initialTab, 'comment')}" id="tab-comment">
+          <div class="comment-label">${t('table.comment')}</div>
           ${canEdit ? `<textarea class="comment-editor" id="tableCommentInput">${escapeHtml(tableComment)}</textarea>` : `<div class="comment">${escapeHtml(formatEmpty(tableComment))}</div>`}
         </div>
         <div class="tab-panel ${getActiveClass(initialTab, 'sql')}" id="tab-sql">
-          <pre class="sql-preview" id="sqlPreview">${escapeHtml(String(metadata.createSql || buildCreateTablePreview(profile, scope, { ...schema, comment: tableComment })))}</pre>
+          <pre class="sql-preview" id="sqlPreview">${escapeHtml(buildCreateTablePreview(profile, scope, { ...schema, comment: tableComment }))}</pre>
         </div>
       </section>
     </main>

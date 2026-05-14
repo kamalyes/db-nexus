@@ -447,6 +447,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
         JOIN information_schema.key_column_usage kcu 
           ON tc.constraint_name = kcu.constraint_name 
           AND tc.table_schema = kcu.table_schema
+          AND tc.table_name = kcu.table_name
         WHERE tc.constraint_type = 'PRIMARY KEY'
       ) pkc ON c.column_name = pkc.column_name 
         AND c.table_name = pkc.table_name 
@@ -510,6 +511,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
       JOIN information_schema.key_column_usage AS kcu
         ON tc.constraint_name = kcu.constraint_name
         AND tc.table_schema = kcu.table_schema
+        AND tc.table_name = kcu.table_name
       JOIN information_schema.constraint_column_usage AS ccu
         ON ccu.constraint_name = tc.constraint_name
         AND ccu.table_schema = tc.table_schema
@@ -595,7 +597,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
       throw new Error('Cannot update table without primary key')
     }
 
-    const setColumns = Object.keys(row).filter(k => !primaryKeyColumns.includes(k))
+    const setColumns = Object.keys(row)
     if (setColumns.length === 0) {
       throw new Error('Cannot update row without editable columns')
     }
@@ -730,6 +732,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
           JOIN information_schema.key_column_usage kcu
             ON tc.constraint_name = kcu.constraint_name
             AND tc.table_schema = kcu.table_schema
+            AND tc.table_name = kcu.table_name
           WHERE tc.constraint_type = 'PRIMARY KEY'
             AND tc.table_name = $1
             AND tc.table_schema = $2
