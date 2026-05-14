@@ -151,40 +151,42 @@ export async function activate(context: ExtensionContext): Promise<void> {
   const resolveTableTarget = async (
     node: FieldNode | IndexNode | SchemaNode | TableDetailGroupNode | TablesGroupNode | TableTarget | undefined
   ): Promise<TableTarget | undefined> => {
-    if (isTableTarget(node)) {
-      return node
+    const selectedNode = node ?? getSelectedTableTreeNode()
+
+    if (isTableTarget(selectedNode)) {
+      return selectedNode
     }
 
-    if (node instanceof SchemaNode && isTableLikeNode(node)) {
+    if (selectedNode instanceof SchemaNode && isTableLikeNode(selectedNode)) {
       return {
-        profile: node.connectionProfile,
-        scope: node.scope || {},
-        tableName: node.schemaObject.name,
-        objectType: node.schemaObject.type,
-        rowCount: node.schemaObject.rowCount,
-        description: node.schemaObject.description
+        profile: selectedNode.connectionProfile,
+        scope: selectedNode.scope || {},
+        tableName: selectedNode.schemaObject.name,
+        objectType: selectedNode.schemaObject.type,
+        rowCount: selectedNode.schemaObject.rowCount,
+        description: selectedNode.schemaObject.description
       }
     }
 
-    if (node instanceof TableDetailGroupNode) {
+    if (selectedNode instanceof TableDetailGroupNode) {
       return {
-        profile: node.connectionProfile,
-        scope: node.scope || {},
-        tableName: node.tableName,
+        profile: selectedNode.connectionProfile,
+        scope: selectedNode.scope || {},
+        tableName: selectedNode.tableName,
         objectType: 'table'
       }
     }
 
-    if (node instanceof FieldNode || node instanceof IndexNode) {
+    if (selectedNode instanceof FieldNode || selectedNode instanceof IndexNode) {
       return {
-        profile: node.connectionProfile,
-        scope: node.scope || {},
-        tableName: node.tableName,
+        profile: selectedNode.connectionProfile,
+        scope: selectedNode.scope || {},
+        tableName: selectedNode.tableName,
         objectType: 'table'
       }
     }
 
-    const dbContext = await resolveNodeContext(node)
+    const dbContext = await resolveNodeContext(selectedNode)
     if (!dbContext) return undefined
 
     const objects = await connectionService.listObjects(dbContext.profile, dbContext.scope)
@@ -213,6 +215,20 @@ export async function activate(context: ExtensionContext): Promise<void> {
       rowCount: picked.table.rowCount,
       description: picked.table.description
     }
+  }
+
+  const getSelectedTableTreeNode = (): FieldNode | IndexNode | SchemaNode | TableDetailGroupNode | TablesGroupNode | undefined => {
+    const selected = connectionsTreeView?.selection?.[0]
+    if (
+      selected instanceof FieldNode
+      || selected instanceof IndexNode
+      || selected instanceof SchemaNode
+      || selected instanceof TableDetailGroupNode
+      || selected instanceof TablesGroupNode
+    ) {
+      return selected
+    }
+    return undefined
   }
 
   const resolveFieldTarget = async (node: FieldNode | FieldTarget | undefined): Promise<FieldTarget | undefined> => {
@@ -248,7 +264,8 @@ export async function activate(context: ExtensionContext): Promise<void> {
         sql,
         profile: queryContext.profile,
         scope: queryContext.scope,
-        title: getQueryContextLabel(queryContext)
+        title: getQueryContextLabel(queryContext),
+        contextLabel: getQueryContextLabel(queryContext)
       })
       return
     }
@@ -277,6 +294,19 @@ export async function activate(context: ExtensionContext): Promise<void> {
     const parts = [queryContext.profile.name, queryContext.scope.database, queryContext.scope.schema]
       .filter((part): part is string => Boolean(part))
     return queryContext.label || parts.join(' / ')
+  }
+
+  const getTableQueryContextLabel = (target: TableTarget, action?: string): string => {
+    const parts = [
+      target.profile.name,
+      target.scope.database,
+      target.scope.schema,
+      target.tableName
+    ].filter((part): part is string => Boolean(part))
+    if (action) {
+      parts.push(action)
+    }
+    return parts.join(' / ')
   }
 
   const getDefaultQueryScope = (profile: DbConnectionProfile): SchemaScope => ({
@@ -328,10 +358,12 @@ export async function activate(context: ExtensionContext): Promise<void> {
     try {
       const schema = await driver.getTableSchema(target.profile, target.tableName, target.scope)
       const qualifiedName = getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)
-      const columns = schema.columns.filter(column => !column.isAutoIncrement)
+      const columns = schema.columns
+      const label = getTableQueryContextLabel(target, 'INSERT')
       await openSqlDocument(buildInsertTemplate(target.profile.driverId, qualifiedName, columns), {
         profile: target.profile,
-        scope: target.scope
+        scope: target.scope,
+        label
       })
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
@@ -373,9 +405,11 @@ export async function activate(context: ExtensionContext): Promise<void> {
     try {
       const schema = target.schema || await driver.getTableSchema!(target.profile, target.tableName, target.scope)
       const sql = buildMockInsertTemplate(target.profile.driverId, target.scope, target.tableName, schema, rowCount)
+      const label = getTableQueryContextLabel(target, 'MOCK INSERT')
       await openSqlDocument(sql, {
         profile: target.profile,
-        scope: target.scope
+        scope: target.scope,
+        label
       })
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
@@ -407,9 +441,11 @@ export async function activate(context: ExtensionContext): Promise<void> {
       const sql = kind === 'update'
         ? buildUpdateTemplate(target.profile.driverId, qualifiedName, schema.columns)
         : buildDeleteTemplate(target.profile.driverId, qualifiedName, schema.columns)
+      const label = getTableQueryContextLabel(target, kind.toUpperCase())
       await openSqlDocument(sql, {
         profile: target.profile,
-        scope: target.scope
+        scope: target.scope,
+        label
       })
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
@@ -1294,9 +1330,11 @@ export async function activate(context: ExtensionContext): Promise<void> {
       const target = await resolveTableTarget(node)
       if (!target) return
 
+      const label = getTableQueryContextLabel(target, 'SELECT')
       await openSqlDocument(buildSelectTemplate(target.profile.driverId, target.scope, target.tableName), {
         profile: target.profile,
-        scope: target.scope
+        scope: target.scope,
+        label
       })
     }),
     commands.registerCommand('dbNexus.openInsertSql', async (node: FieldNode | IndexNode | SchemaNode | TableDetailGroupNode | TablesGroupNode | undefined) => {

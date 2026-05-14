@@ -12,6 +12,7 @@ interface SqlEditorOptions {
   profile?: DbConnectionProfile
   scope?: SchemaScope
   title?: string
+  contextLabel?: string
   uri?: Uri
 }
 
@@ -44,6 +45,8 @@ export class SqlEditorPanel {
   private selectedProfile: DbConnectionProfile | undefined
   private scope: SchemaScope
   private sql: string
+  private readonly title: string | undefined
+  private readonly contextLabel: string | undefined
   private uri: Uri | undefined
 
   static show(
@@ -78,6 +81,8 @@ export class SqlEditorPanel {
     this.selectedProfile = options.profile
     this.scope = { ...(options.scope || {}) }
     this.sql = options.sql || t('query.scratchContent')
+    this.title = options.title
+    this.contextLabel = options.contextLabel
     this.uri = options.uri
 
     this.panel.webview.html = this.render()
@@ -188,8 +193,8 @@ export class SqlEditorPanel {
       selectedSchema: this.scope.schema || '',
       dialect: this.selectedProfile?.driverId || 'sql',
       sql: this.sql,
-      title: this.uri ? this.getFileName(this.uri) : 'SQL Scratch',
-      contextLabel: this.selectedProfile ? this.getContextLabel(this.selectedProfile) : ''
+      title: this.uri ? this.getFileName(this.uri) : this.title || 'SQL Scratch',
+      contextLabel: this.contextLabel || (this.selectedProfile ? this.getContextLabel(this.selectedProfile) : '')
     }
   }
 
