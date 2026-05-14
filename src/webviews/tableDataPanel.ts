@@ -13,7 +13,7 @@ export class TableDataPanel {
   private _scope: SchemaScope
   private _schema: TableSchema | undefined
   private _currentPage: number = 1
-  private _pageSize: number = 50
+  private _pageSize: number = 10
   private _totalRows: number = 0
   private _totalRowsKnown: boolean = true
   private _hasMoreRows: boolean = false
@@ -99,7 +99,7 @@ export class TableDataPanel {
             await this._loadData()
             break
           case 'pageSizeChange':
-            this._pageSize = Math.max(1, Number(message.pageSize) || 50)
+            this._pageSize = Math.min(10000, Math.max(1, Number(message.pageSize) || 10))
             this._currentPage = 1
             await this._loadData()
             break
@@ -122,8 +122,11 @@ export class TableDataPanel {
           case 'delete':
             await this._handleDelete(message.row)
             break
+          case 'deleteRows':
+            await this._handleDeleteRows(message.rows || [])
+            break
           case 'commitChanges':
-            await this._handleCommitChanges(message.changes || [])
+            await this._handleCommitChanges(message.changes || [], message.deletes || [])
             break
         }
       },
@@ -265,20 +268,41 @@ export class TableDataPanel {
   }
 
   private async _handleCommitChanges(
-    changes: Array<{ row: Record<string, unknown>; originalRow: Record<string, unknown> }>
+    changes: Array<{ row: Record<string, unknown>; originalRow: Record<string, unknown> }>,
+    deletes: Array<Record<string, unknown>> = []
   ): Promise<void> {
     try {
-      if (!this._driver.planUpdate || !this._driver.executeMutation) {
+      if (!this._driver.executeMutation) {
+        throw new Error('Driver does not support mutations')
+      }
+      if (changes.length > 0 && !this._driver.planUpdate) {
         throw new Error('Driver does not support update')
+      }
+      if (deletes.length > 0 && !this._driver.planDelete) {
+        throw new Error('Driver does not support delete')
       }
 
       let affectedRows = 0
       for (const change of changes) {
-        const plan = await this._driver.planUpdate(
+        const plan = await this._driver.planUpdate!(
           this._profile,
           this._tableName,
           change.row,
           change.originalRow,
+          this._scope
+        )
+        const result = await this._driver.executeMutation(this._profile, plan)
+        if (!result.success) {
+          throw new Error(result.error || 'Unknown error')
+        }
+        affectedRows += result.affectedRows || 0
+      }
+
+      for (const row of deletes) {
+        const plan = await this._driver.planDelete!(
+          this._profile,
+          this._tableName,
+          row,
           this._scope
         )
         const result = await this._driver.executeMutation(this._profile, plan)
@@ -297,25 +321,37 @@ export class TableDataPanel {
   }
 
   private async _handleDelete(row: Record<string, unknown>): Promise<void> {
+    await this._handleDeleteRows(row ? [row] : [])
+  }
+
+  private async _handleDeleteRows(rows: Record<string, unknown>[]): Promise<void> {
     try {
       if (!this._driver.planDelete || !this._driver.executeMutation) {
         throw new Error('Driver does not support delete')
       }
 
-      const plan = await this._driver.planDelete(
-        this._profile,
-        this._tableName,
-        row,
-        this._scope
-      )
-
-      const result = await this._driver.executeMutation(this._profile, plan)
-      if (result.success) {
-        this._sendMessage({ type: 'operationSuccess', message: `Deleted ${result.affectedRows} row(s)` })
-        await this._loadData()
-      } else {
-        this._sendMessage({ type: 'operationError', error: result.error || 'Unknown error' })
+      if (!Array.isArray(rows) || rows.length === 0) {
+        return
       }
+
+      let affectedRows = 0
+      for (const row of rows) {
+        const plan = await this._driver.planDelete(
+          this._profile,
+          this._tableName,
+          row,
+          this._scope
+        )
+
+        const result = await this._driver.executeMutation(this._profile, plan)
+        if (!result.success) {
+          throw new Error(result.error || 'Unknown error')
+        }
+        affectedRows += result.affectedRows || 0
+      }
+
+      this._sendMessage({ type: 'operationSuccess', message: `Deleted ${affectedRows} row(s)` })
+      await this._loadData()
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
       this._sendMessage({ type: 'operationError', error: message })
@@ -470,13 +506,21 @@ export class TableDataPanel {
     const canEdit = primaryKeyColumns.length > 0
     const canInsert = !!(this._driver.planInsert && this._driver.executeMutation && this._schema)
     const canDelete = !!(canEdit && this._driver.planDelete && this._driver.executeMutation)
+    const hasBottomBar = canEdit || canInsert || canDelete
     const insertColumnDetails = this._schema?.columns || []
     const insertColumns = insertColumnDetails.map(column => column.name)
     const defaultColumnWidth = 180
 
     const colgroup = [
+      '<col class="select-col" style="width: 42px">',
       ...columns.map((column, index) => `<col data-col-index="${index}" style="width: ${defaultColumnWidth}px">`)
     ].join('')
+
+    const selectHeader = `
+      <th class="select-header">
+        <input id="selectAllRows" type="checkbox" title="Select all rows on this page" ${rows.length === 0 ? 'disabled' : ''}>
+      </th>
+    `
 
     const headers = columns.map((column, index) => {
       const isPk = primaryKeyColumns.includes(column)
@@ -495,6 +539,9 @@ export class TableDataPanel {
 
     const bodyRows = rows.length > 0 ? rows.map((row, rowIndex) => `
       <tr data-row-index="${rowIndex}">
+        <td class="select-cell">
+          <input type="checkbox" class="row-select" data-row-select="${rowIndex}" title="Select row ${offset + rowIndex + 1}">
+        </td>
         ${columns.map((column, columnIndex) => {
           const value = row[column]
           const raw = value === null || value === undefined ? '' : String(value)
@@ -507,7 +554,7 @@ export class TableDataPanel {
       </tr>
     `).join('') : `
       <tr class="empty-row">
-        <td class="empty-cell" colspan="${Math.max(1, columns.length)}">No rows on this page</td>
+        <td class="empty-cell" colspan="${Math.max(1, columns.length + 1)}">No rows on this page</td>
       </tr>
     `
 
@@ -544,7 +591,7 @@ export class TableDataPanel {
       color: var(--vscode-foreground);
       background: var(--vscode-editor-background);
       font-size: 13px;
-      padding-bottom: ${canEdit ? '58px' : '12px'};
+      padding-bottom: ${hasBottomBar ? '58px' : '12px'};
     }
     .toolbar, .filter-bar, .pagination {
       display: flex;
@@ -630,7 +677,7 @@ export class TableDataPanel {
     .table-container {
       overflow: auto;
       border: 1px solid var(--vscode-widget-border);
-      max-height: calc(100vh - ${canEdit ? '188px' : '138px'});
+      max-height: calc(100vh - ${hasBottomBar ? '188px' : '138px'});
     }
     table {
       border-collapse: collapse;
@@ -658,6 +705,29 @@ export class TableDataPanel {
       user-select: none;
       background: var(--vscode-editorGroupHeader-tabsBackground);
       font-weight: 600;
+    }
+    .select-header,
+    .select-cell {
+      width: 42px;
+      min-width: 42px;
+      max-width: 42px;
+      padding: 0;
+      text-align: center;
+      vertical-align: middle;
+    }
+    .select-header {
+      left: 0;
+      z-index: 4;
+    }
+    .select-cell {
+      background: var(--vscode-editor-background);
+    }
+    .select-cell input,
+    .select-header input {
+      width: 14px;
+      height: 14px;
+      margin: 0;
+      cursor: pointer;
     }
     .header-content {
       display: flex;
@@ -710,6 +780,17 @@ export class TableDataPanel {
       background: var(--vscode-list-activeSelectionBackground);
       color: var(--vscode-list-activeSelectionForeground);
     }
+    tr.selected-row .select-cell {
+      background: var(--vscode-list-activeSelectionBackground);
+    }
+    tr.row-delete-pending td {
+      color: var(--vscode-disabledForeground, var(--vscode-descriptionForeground));
+      background: color-mix(in srgb, var(--vscode-errorForeground) 12%, var(--vscode-editor-background));
+      text-decoration: line-through;
+    }
+    tr.row-delete-pending .select-cell {
+      text-decoration: none;
+    }
     .empty-cell {
       height: 96px;
       text-align: center;
@@ -751,6 +832,9 @@ export class TableDataPanel {
     .pagination {
       margin-top: 10px;
     }
+    .page-size-input {
+      width: 82px;
+    }
     .page-info {
       color: var(--vscode-descriptionForeground);
       font-size: 12px;
@@ -775,15 +859,86 @@ export class TableDataPanel {
       color: var(--vscode-descriptionForeground);
       font-size: 12px;
     }
+    .row-actions {
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+      padding-right: 8px;
+      border-right: 1px solid var(--vscode-panel-border);
+    }
     .icon-button {
       min-width: 34px;
       font-size: 15px;
       line-height: 1;
     }
+    .context-menu {
+      position: fixed;
+      z-index: 30;
+      min-width: 132px;
+      padding: 4px;
+      border: 1px solid var(--vscode-widget-border);
+      border-radius: 4px;
+      background: var(--vscode-menu-background, var(--vscode-editorWidget-background));
+      box-shadow: 0 8px 24px rgba(0,0,0,.24);
+    }
+    .context-menu.hidden {
+      display: none;
+    }
+    .context-menu button {
+      width: 100%;
+      justify-content: flex-start;
+      border-radius: 2px;
+      color: var(--vscode-menu-foreground, var(--vscode-foreground));
+      background: transparent;
+    }
+    .context-menu button:hover:not(:disabled) {
+      background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground));
+      color: var(--vscode-menu-selectionForeground, var(--vscode-foreground));
+    }
+    .delete-confirm-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 40;
+      display: grid;
+      place-items: center;
+      background: rgba(0, 0, 0, .28);
+    }
+    .delete-confirm-backdrop.hidden {
+      display: none;
+    }
+    .delete-confirm {
+      width: min(420px, calc(100vw - 32px));
+      padding: 14px;
+      border: 1px solid var(--vscode-widget-border);
+      border-radius: 6px;
+      background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+      box-shadow: 0 12px 36px rgba(0,0,0,.34);
+    }
+    .delete-confirm-title {
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+    .delete-confirm-message {
+      margin-bottom: 14px;
+      color: var(--vscode-descriptionForeground);
+      line-height: 1.45;
+    }
+    .delete-confirm-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    .danger-button {
+      color: var(--vscode-button-foreground);
+      background: var(--vscode-errorForeground);
+    }
+    .danger-button:hover:not(:disabled) {
+      background: color-mix(in srgb, var(--vscode-errorForeground) 84%, black);
+    }
     .toast {
       position: fixed;
       right: 16px;
-      bottom: ${canEdit ? '62px' : '16px'};
+      bottom: ${hasBottomBar ? '62px' : '16px'};
       z-index: 20;
       max-width: min(520px, calc(100vw - 32px));
       padding: 10px 14px;
@@ -803,8 +958,7 @@ export class TableDataPanel {
 <body>
   <div class="toolbar">
     <button id="refreshBtn" class="secondary" title="F5">${this._escapeHtml(t('common.refresh'))}</button>
-    ${canInsert ? '<button id="addRowBtn">New Row</button>' : ''}
-    ${canDelete ? '<button id="deleteRowBtn" class="secondary" disabled>Delete Row</button>' : ''}
+    <span class="page-info" id="selectionStatus">0 selected</span>
     <div class="stats">${this._escapeHtml(statsText)} / ${this._escapeHtml(pageInfo)}</div>
   </div>
 
@@ -836,11 +990,26 @@ export class TableDataPanel {
       <colgroup>${colgroup}</colgroup>
       <thead>
         <tr>
+          ${selectHeader}
           ${headers}
         </tr>
       </thead>
       <tbody id="tableBody">${bodyRows}</tbody>
     </table>
+  </div>
+  <div class="context-menu hidden" id="rowContextMenu">
+    <button id="contextDeleteRow" type="button">Delete row</button>
+    <button id="contextUndoDelete" type="button">Undo delete</button>
+  </div>
+  <div class="delete-confirm-backdrop hidden" id="deleteConfirmDialog" role="dialog" aria-modal="true">
+    <div class="delete-confirm">
+      <div class="delete-confirm-title">Confirm delete</div>
+      <div class="delete-confirm-message" id="deleteConfirmMessage"></div>
+      <div class="delete-confirm-actions">
+        <button id="deleteConfirmCancel" class="secondary" type="button">Cancel</button>
+        <button id="deleteConfirmPrimary" class="danger-button" type="button">Mark delete</button>
+      </div>
+    </div>
   </div>
 
   <div class="pagination">
@@ -850,18 +1019,25 @@ export class TableDataPanel {
     <button id="nextPage" class="secondary" ${canGoNext ? '' : 'disabled'}>Next</button>
     <button id="lastPage" class="secondary" ${canGoLast ? '' : 'disabled'}>Last</button>
     <select id="pageSizeSelect">
+      <option value="10" ${this._pageSize === 10 ? 'selected' : ''}>10 rows</option>
       <option value="25" ${this._pageSize === 25 ? 'selected' : ''}>25 rows</option>
       <option value="50" ${this._pageSize === 50 ? 'selected' : ''}>50 rows</option>
       <option value="100" ${this._pageSize === 100 ? 'selected' : ''}>100 rows</option>
       <option value="200" ${this._pageSize === 200 ? 'selected' : ''}>200 rows</option>
+      ${[10, 25, 50, 100, 200].includes(this._pageSize) ? '' : `<option value="${this._pageSize}" selected>${this._pageSize} rows</option>`}
     </select>
+    <input id="pageSizeInput" class="page-size-input" type="number" min="1" max="10000" value="${this._pageSize}" title="Custom rows per page">
+    <button id="applyPageSize" class="secondary">Rows</button>
   </div>
 
-  ${canEdit ? `
+  ${hasBottomBar ? `
   <div class="commit-bar">
+    <div class="row-actions">
+      ${canInsert ? '<button class="icon-button" id="addRowBtn" type="button" title="New row">+</button>' : ''}
+      ${canDelete ? '<button class="icon-button secondary" id="removeRowsBtn" type="button" title="Mark selected rows for delete" disabled>-</button>' : ''}
+    </div>
     <span class="pending-status" id="pendingStatus">No pending changes</span>
-    <button class="icon-button" id="commitBtn" title="Commit changes (Ctrl+S)" disabled>&#10003;</button>
-    <button class="icon-button secondary" id="revertBtn" title="Cancel and restore" disabled>&#8634;</button>
+    ${canEdit ? '<button class="icon-button" id="commitBtn" title="Commit changes (Ctrl+S)" disabled>&#10003;</button><button class="icon-button secondary" id="revertBtn" title="Cancel and restore" disabled>&#8634;</button>' : ''}
   </div>
   ` : ''}
 
@@ -875,7 +1051,10 @@ export class TableDataPanel {
     const canDelete = ${canDelete ? 'true' : 'false'};
     const insertColumns = ${this._escapeScriptJson(JSON.stringify(insertColumns))};
     const pendingUpdates = new Map();
-    let selectedRowIndex = null;
+    const pendingDeletes = new Map();
+    const selectedRows = new Set();
+    let pendingDeleteTargets = [];
+    let contextRowIndex = null;
 
     document.getElementById('refreshBtn').addEventListener('click', () => {
       vscode.postMessage({ type: 'refresh' });
@@ -887,22 +1066,212 @@ export class TableDataPanel {
       }
     });
 
+    function selectedRowIndexes() {
+      return Array.from(selectedRows).sort((left, right) => left - right);
+    }
+
+    function syncSelectedRowsFromCheckboxes() {
+      selectedRows.clear();
+      document.querySelectorAll('.row-select').forEach(checkbox => {
+        if (checkbox.checked) {
+          selectedRows.add(Number(checkbox.dataset.rowSelect));
+        }
+      });
+    }
+
     function updateSelectedRowState() {
       document.querySelectorAll('tr[data-row-index]').forEach(row => {
-        row.classList.toggle('selected-row', Number(row.dataset.rowIndex) === selectedRowIndex);
+        const rowIndex = Number(row.dataset.rowIndex);
+        const selected = selectedRows.has(rowIndex);
+        row.classList.toggle('selected-row', selected);
+        row.classList.toggle('row-delete-pending', pendingDeletes.has(rowIndex));
+        const checkbox = row.querySelector('.row-select');
+        if (checkbox) {
+          checkbox.checked = selected;
+        }
       });
+
+      const count = selectedRows.size;
+      const selectionStatus = document.getElementById('selectionStatus');
+      if (selectionStatus) {
+        selectionStatus.textContent = count === 1 ? '1 selected' : count + ' selected';
+      }
+
       const deleteButton = document.getElementById('deleteRowBtn');
       if (deleteButton) {
-        deleteButton.disabled = !canDelete || selectedRowIndex === null;
+        deleteButton.disabled = !canDelete || count === 0;
+        deleteButton.textContent = count > 1 ? 'Delete ' + count + ' Rows' : 'Delete Selected';
+      }
+      const removeButton = document.getElementById('removeRowsBtn');
+      if (removeButton) {
+        removeButton.disabled = !canDelete || count === 0;
+      }
+
+      const selectAll = document.getElementById('selectAllRows');
+      if (selectAll) {
+        const selectableRows = document.querySelectorAll('tr[data-row-index]').length;
+        selectAll.checked = selectableRows > 0 && count === selectableRows;
+        selectAll.indeterminate = count > 0 && count < selectableRows;
       }
     }
 
     document.querySelectorAll('tr[data-row-index]').forEach(row => {
       row.addEventListener('click', event => {
         if (event.target.closest('input')) return;
-        selectedRowIndex = Number(row.dataset.rowIndex);
+        const rowIndex = Number(row.dataset.rowIndex);
+        if (selectedRows.has(rowIndex)) {
+          selectedRows.delete(rowIndex);
+        } else {
+          selectedRows.add(rowIndex);
+        }
         updateSelectedRowState();
       });
+    });
+
+    document.querySelectorAll('.row-select').forEach(checkbox => {
+      checkbox.addEventListener('change', event => {
+        const rowIndex = Number(checkbox.dataset.rowSelect);
+        if (checkbox.checked) {
+          selectedRows.add(rowIndex);
+        } else {
+          selectedRows.delete(rowIndex);
+        }
+        updateSelectedRowState();
+        event.stopPropagation();
+      });
+    });
+
+    document.getElementById('selectAllRows')?.addEventListener('change', event => {
+      selectedRows.clear();
+      if (event.target.checked) {
+        document.querySelectorAll('tr[data-row-index]').forEach(row => {
+          selectedRows.add(Number(row.dataset.rowIndex));
+        });
+      }
+      updateSelectedRowState();
+    });
+
+    function hideRowContextMenu() {
+      const menu = document.getElementById('rowContextMenu');
+      if (menu) {
+        menu.classList.add('hidden');
+      }
+      contextRowIndex = null;
+    }
+
+    function showRowContextMenu(event, rowIndex) {
+      const menu = document.getElementById('rowContextMenu');
+      if (!menu) return;
+      contextRowIndex = rowIndex;
+      const deleteButton = document.getElementById('contextDeleteRow');
+      const undoButton = document.getElementById('contextUndoDelete');
+      if (deleteButton) {
+        deleteButton.disabled = !canDelete || pendingDeletes.has(rowIndex);
+      }
+      if (undoButton) {
+        undoButton.disabled = !pendingDeletes.has(rowIndex);
+      }
+      menu.style.left = Math.min(event.clientX, window.innerWidth - 150) + 'px';
+      menu.style.top = Math.min(event.clientY, window.innerHeight - 78) + 'px';
+      menu.classList.remove('hidden');
+    }
+
+    function clearRowPendingUpdate(rowIndex) {
+      pendingUpdates.delete(rowIndex);
+      const row = document.querySelector('tr[data-row-index="' + rowIndex + '"]');
+      if (!row) return;
+      row.classList.remove('row-dirty');
+      row.querySelectorAll('.data-cell').forEach(cell => {
+        const column = cell.dataset.column;
+        renderCellValue(cell, rows[rowIndex][column]);
+        cell.classList.remove('dirty');
+      });
+    }
+
+    function markRowsForDelete(rowIndexes) {
+      if (!canDelete) return;
+      const targets = rowIndexes
+        .filter(rowIndex => rows[rowIndex] && !pendingDeletes.has(rowIndex));
+      if (targets.length === 0) return;
+
+      targets.forEach(rowIndex => {
+        pendingDeletes.set(rowIndex, rows[rowIndex]);
+        selectedRows.delete(rowIndex);
+        clearRowPendingUpdate(rowIndex);
+      });
+      hideRowContextMenu();
+      updateSelectedRowState();
+      updateCommitState();
+      showToast(targets.length === 1 ? 'Row marked for delete' : targets.length + ' rows marked for delete', 'success');
+    }
+
+    function undoDelete(rowIndexes) {
+      rowIndexes.forEach(rowIndex => pendingDeletes.delete(rowIndex));
+      hideRowContextMenu();
+      updateSelectedRowState();
+      updateCommitState();
+    }
+
+    function hideDeleteConfirm() {
+      pendingDeleteTargets = [];
+      document.getElementById('deleteConfirmDialog')?.classList.add('hidden');
+    }
+
+    function requestDeleteRows(rowIndexes) {
+      syncSelectedRowsFromCheckboxes();
+      const sourceIndexes = rowIndexes.length > 0 ? rowIndexes : selectedRowIndexes();
+      const targets = sourceIndexes
+        .filter(rowIndex => rows[rowIndex] && !pendingDeletes.has(rowIndex));
+      if (targets.length === 0) {
+        showToast('Select rows to delete', 'error');
+        return;
+      }
+      pendingDeleteTargets = targets;
+      const message = targets.length === 1
+        ? 'This row will be marked for delete. You can still undo before commit.'
+        : targets.length + ' rows will be marked for delete. You can still undo before commit.';
+      document.getElementById('deleteConfirmMessage').textContent = message;
+      document.getElementById('deleteConfirmPrimary').textContent = targets.length === 1 ? 'Mark delete' : 'Mark ' + targets.length + ' deletes';
+      document.getElementById('deleteConfirmDialog').classList.remove('hidden');
+    }
+
+    document.querySelectorAll('tr[data-row-index]').forEach(row => {
+      row.addEventListener('contextmenu', event => {
+        event.preventDefault();
+        const rowIndex = Number(row.dataset.rowIndex);
+        if (!selectedRows.has(rowIndex)) {
+          selectedRows.clear();
+          selectedRows.add(rowIndex);
+          updateSelectedRowState();
+        }
+        showRowContextMenu(event, rowIndex);
+      });
+    });
+
+    document.getElementById('contextDeleteRow')?.addEventListener('click', () => {
+      if (contextRowIndex === null) return;
+      const targets = selectedRows.has(contextRowIndex) ? selectedRowIndexes() : [contextRowIndex];
+      requestDeleteRows(targets);
+    });
+    document.getElementById('contextUndoDelete')?.addEventListener('click', () => {
+      if (contextRowIndex === null) return;
+      undoDelete([contextRowIndex]);
+    });
+    document.addEventListener('click', event => {
+      if (!event.target.closest || !event.target.closest('#rowContextMenu')) {
+        hideRowContextMenu();
+      }
+    });
+    document.getElementById('deleteConfirmCancel')?.addEventListener('click', hideDeleteConfirm);
+    document.getElementById('deleteConfirmDialog')?.addEventListener('click', event => {
+      if (event.target.id === 'deleteConfirmDialog') {
+        hideDeleteConfirm();
+      }
+    });
+    document.getElementById('deleteConfirmPrimary')?.addEventListener('click', () => {
+      const targets = pendingDeleteTargets.slice();
+      hideDeleteConfirm();
+      markRowsForDelete(targets);
     });
 
     const addRowButton = document.getElementById('addRowBtn');
@@ -937,9 +1306,12 @@ export class TableDataPanel {
       });
     }
     document.getElementById('deleteRowBtn')?.addEventListener('click', () => {
-      if (selectedRowIndex === null || !rows[selectedRowIndex]) return;
-      vscode.postMessage({ type: 'delete', row: rows[selectedRowIndex] });
+      requestDeleteRows(selectedRowIndexes());
     });
+    document.getElementById('removeRowsBtn')?.addEventListener('click', () => {
+      requestDeleteRows(selectedRowIndexes());
+    });
+    updateSelectedRowState();
 
     function parseTemporalValue(raw) {
       if (!raw || typeof raw !== 'string') return '';
@@ -995,6 +1367,7 @@ export class TableDataPanel {
     function startCellEdit(cell) {
       if (!canEdit || cell.querySelector('input')) return;
       const rowIndex = Number(cell.dataset.rowIndex);
+      if (pendingDeletes.has(rowIndex)) return;
       const column = cell.dataset.column;
       const pending = pendingUpdates.get(rowIndex);
       const sourceRow = pending ? pending.row : rows[rowIndex];
@@ -1045,29 +1418,38 @@ export class TableDataPanel {
 
     function updateCommitState() {
       if (!canEdit) return;
-      const count = pendingUpdates.size;
-      document.getElementById('pendingStatus').textContent = count ? count + ' pending row(s)' : 'No pending changes';
+      const updateCount = pendingUpdates.size;
+      const deleteCount = pendingDeletes.size;
+      const count = updateCount + deleteCount;
+      const parts = [];
+      if (updateCount) parts.push(updateCount + ' edited');
+      if (deleteCount) parts.push(deleteCount + ' delete pending');
+      document.getElementById('pendingStatus').textContent = count ? parts.join(', ') : 'No pending changes';
       document.getElementById('commitBtn').disabled = count === 0;
       document.getElementById('revertBtn').disabled = count === 0;
     }
 
     function commitChanges() {
-      if (!pendingUpdates.size) return;
+      if (!pendingUpdates.size && !pendingDeletes.size) return;
       const changes = Array.from(pendingUpdates.values());
-      vscode.postMessage({ type: 'commitChanges', changes });
+      const deletes = Array.from(pendingDeletes.values());
+      vscode.postMessage({ type: 'commitChanges', changes, deletes });
     }
 
     function revertChanges() {
       pendingUpdates.clear();
+      pendingDeletes.clear();
       document.querySelectorAll('tr[data-row-index]').forEach(row => {
         const rowIndex = Number(row.dataset.rowIndex);
         row.classList.remove('row-dirty');
+        row.classList.remove('row-delete-pending');
         row.querySelectorAll('.data-cell').forEach(cell => {
           const column = cell.dataset.column;
           renderCellValue(cell, rows[rowIndex][column]);
           cell.classList.remove('dirty');
         });
       });
+      updateSelectedRowState();
       updateCommitState();
     }
 
@@ -1151,7 +1533,22 @@ export class TableDataPanel {
     document.getElementById('nextPage').addEventListener('click', () => vscode.postMessage({ type: 'pageChange', page: ${this._currentPage + 1} }));
     document.getElementById('lastPage').addEventListener('click', () => vscode.postMessage({ type: 'pageChange', page: ${totalPages} }));
     document.getElementById('pageSizeSelect').addEventListener('change', event => {
-      vscode.postMessage({ type: 'pageSizeChange', pageSize: Number(event.target.value) });
+      const nextSize = Number(event.target.value);
+      document.getElementById('pageSizeInput').value = String(nextSize);
+      vscode.postMessage({ type: 'pageSizeChange', pageSize: nextSize });
+    });
+    function applyCustomPageSize() {
+      const input = document.getElementById('pageSizeInput');
+      const nextSize = Math.max(1, Math.min(10000, Number(input.value) || ${this._pageSize}));
+      input.value = String(nextSize);
+      vscode.postMessage({ type: 'pageSizeChange', pageSize: nextSize });
+    }
+    document.getElementById('applyPageSize').addEventListener('click', applyCustomPageSize);
+    document.getElementById('pageSizeInput').addEventListener('keydown', event => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        applyCustomPageSize();
+      }
     });
 
     window.addEventListener('message', event => {
