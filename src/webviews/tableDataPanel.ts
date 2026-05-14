@@ -470,9 +470,8 @@ export class TableDataPanel {
     const canEdit = primaryKeyColumns.length > 0
     const canInsert = !!(this._driver.planInsert && this._driver.executeMutation && this._schema)
     const canDelete = !!(canEdit && this._driver.planDelete && this._driver.executeMutation)
-    const insertColumns = (this._schema?.columns || [])
-      .filter(column => !column.isAutoIncrement)
-      .map(column => column.name)
+    const insertColumnDetails = this._schema?.columns || []
+    const insertColumns = insertColumnDetails.map(column => column.name)
     const defaultColumnWidth = 180
 
     const colgroup = [
@@ -515,10 +514,10 @@ export class TableDataPanel {
     const insertPanel = canInsert ? `
   <div class="insert-panel hidden" id="insertPanel">
     <div class="insert-grid">
-      ${insertColumns.map(column => `
+      ${insertColumnDetails.map(column => `
         <label>
-          <span>${this._escapeHtml(column)}</span>
-          <input data-insert-column="${this._escapeAttr(column)}" type="text">
+          <span>${column.isPrimaryKey ? '<span class="pk-indicator" title="Primary Key">&#128273; PK</span> ' : ''}${this._escapeHtml(column.name)}</span>
+          <input data-insert-column="${this._escapeAttr(column.name)}" type="text" placeholder="${this._escapeAttr(column.isAutoIncrement ? t('table.autoIncrementLeaveBlank') : column.type)}">
         </label>
       `).join('')}
     </div>

@@ -135,6 +135,29 @@ export class TableSchemaPanel {
         return
       }
 
+      if (message.type === 'resetAutoIncrement') {
+        const activeTab = isTableSchemaTab(message.activeTab) ? message.activeTab : 'options'
+        const updatedSchema = await commands.executeCommand<TableSchema | undefined>('dbNexus.resetAutoIncrement', {
+          profile: currentPanelContext.profile,
+          scope,
+          tableName: currentSchema.name,
+          objectType,
+          nextValue: message.nextValue
+        })
+        if (updatedSchema) {
+          currentSchema = updatedSchema
+          currentPanelContext = {
+            ...currentPanelContext,
+            mode: 'design',
+            initialTab: activeTab,
+            loadedAt: new Date().toISOString()
+          }
+          panel.title = t('table.schemaTitle', updatedSchema.name)
+          panel.webview.html = this.render(currentSchema, currentPanelContext)
+        }
+        return
+      }
+
       if (message.type === 'dropColumn' && typeof message.columnName === 'string') {
         const column = currentSchema.columns.find(item => item.name === message.columnName)
         if (!column) {
@@ -186,6 +209,10 @@ export class TableSchemaPanel {
     const primaryKeys = schema.columns.filter(column => column.isPrimaryKey).map(column => column.name)
     const primaryKeyIconHtml = `<span class="pk-indicator" title="${escapeAttribute(t('table.primaryKey'))}">&#128273;</span>`
     const autoIncrementColumns = schema.columns.filter(column => column.isAutoIncrement).map(column => column.name)
+    const canResetAutoIncrement = canEdit
+      && (profile?.driverId === 'mysql' || profile?.driverId === 'mariadb')
+      && autoIncrementColumns.length > 0
+    const autoIncrementValue = metadata.autoIncrement === undefined || metadata.autoIncrement === null ? '' : String(metadata.autoIncrement)
     const nullableColumns = schema.columns.filter(column => column.nullable).length
     const notNullColumns = schema.columns.length - nullableColumns
     const loadedAt = panelContext.loadedAt || new Date().toISOString()
@@ -602,6 +629,34 @@ export class TableSchemaPanel {
       color: var(--vscode-descriptionForeground);
       font-size: 12px;
     }
+    .option-editor {
+      display: flex;
+      align-items: flex-end;
+      gap: 10px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--vscode-panel-border);
+    }
+    .option-field {
+      display: grid;
+      gap: 5px;
+      min-width: 220px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+    }
+    .option-field input {
+      min-height: 26px;
+      color: var(--vscode-input-foreground);
+      background: var(--vscode-input-background);
+      border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+      border-radius: 2px;
+      font: inherit;
+      padding: 3px 6px;
+    }
+    .option-action {
+      border: 1px solid var(--vscode-button-border, transparent);
+      background: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
+    }
     .status {
       margin-left: auto;
       color: var(--vscode-descriptionForeground);
@@ -792,8 +847,18 @@ export class TableSchemaPanel {
         <div class="tab-panel ${getActiveClass(initialTab, 'checks')}" id="tab-checks"><div class="empty">${t('table.notSupportedYet')}</div></div>
         <div class="tab-panel ${getActiveClass(initialTab, 'triggers')}" id="tab-triggers"><div class="empty">${t('table.notSupportedYet')}</div></div>
         <div class="tab-panel ${getActiveClass(initialTab, 'options')}" id="tab-options">
+          ${canResetAutoIncrement ? `
+          <div class="option-editor">
+            <label class="option-field">
+              <span>${t('table.nextAutoIncrement')}</span>
+              <input id="autoIncrementValueInput" type="number" min="1" step="1" value="${escapeAttribute(autoIncrementValue)}" placeholder="1">
+            </label>
+            <button class="tool option-action" id="resetAutoIncrementButton">${t('table.resetAutoIncrement')}</button>
+          </div>
+          ` : ''}
           ${renderInfoSection('', [
             [t('table.engine'), metadata.engine],
+            [t('table.nextAutoIncrement'), metadata.autoIncrement],
             [t('table.rowFormat'), metadata.rowFormat],
             [t('table.charset'), metadata.charset],
             [t('table.collation'), metadata.tableCollation],
@@ -859,7 +924,8 @@ export class TableSchemaPanel {
       duplicateColumnName: t('table.duplicateColumnName'),
       indexNameRequired: t('table.indexNameRequired'),
       indexColumnRequired: t('table.indexColumnRequired'),
-      indexColumnUnknown: t('table.indexColumnUnknown')
+      indexColumnUnknown: t('table.indexColumnUnknown'),
+      autoIncrementValueInvalid: t('table.autoIncrementValueInvalid')
     }))};
     let selectedColumnId = draftColumns[0] ? draftColumns[0].id : null;
     let selectedIndexId = null;
@@ -1713,6 +1779,18 @@ export class TableSchemaPanel {
       vscode.postMessage({ type: 'reloadSchema', activeTab: getActiveTab() });
     }
 
+    function resetAutoIncrement() {
+      const input = document.getElementById('autoIncrementValueInput');
+      if (!input) return;
+      const nextValue = Number(input.value);
+      if (!Number.isInteger(nextValue) || nextValue < 1) {
+        alert(labels.autoIncrementValueInvalid);
+        input.focus();
+        return;
+      }
+      vscode.postMessage({ type: 'resetAutoIncrement', activeTab: getActiveTab(), nextValue });
+    }
+
     document.querySelectorAll('.tab').forEach(tab => {
       tab.addEventListener('click', () => {
         activateTab(tab.dataset.tab);
@@ -1737,6 +1815,7 @@ export class TableSchemaPanel {
     document.getElementById('dropIndexButton')?.addEventListener('click', dropSelectedIndex);
     document.getElementById('saveDesignButton')?.addEventListener('click', saveDesign);
     document.getElementById('cancelDesignButton')?.addEventListener('click', cancelDesign);
+    document.getElementById('resetAutoIncrementButton')?.addEventListener('click', resetAutoIncrement);
     document.getElementById('tableNameInput')?.addEventListener('input', () => {
       const sideTitle = document.querySelector('.side-title');
       if (sideTitle) sideTitle.textContent = getTableName();

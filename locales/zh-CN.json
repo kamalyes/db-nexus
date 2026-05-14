@@ -85,6 +85,7 @@
     "delete": "删除",
     "cancel": "取消",
     "save": "保存",
+    "refresh": "刷新",
     "retry": "重试",
     "yes": "是",
     "no": "否"
@@ -214,6 +215,9 @@
     "foreignKeyCount": "外键数",
     "primaryKeys": "主键",
     "autoIncrementColumns": "自动递增字段",
+    "nextAutoIncrement": "下一个自增值",
+    "resetAutoIncrement": "重置自增",
+    "autoIncrementLeaveBlank": "留空自动生成",
     "nullableColumns": "可空字段",
     "notNullColumns": "非空字段",
     "length": "长度",
@@ -276,6 +280,9 @@
     "columnAlterNotSupported": "{0} \u6682\u4e0d\u652f\u6301\u8fd9\u7c7b\u5b57\u6bb5\u4fee\u6539",
     "primaryKeyAlterNotSupported": "{0} \u6682\u4e0d\u652f\u6301\u4fee\u6539\u4e3b\u952e",
     "autoIncrementAlterNotSupported": "\u8be5\u9a71\u52a8\u6682\u4e0d\u652f\u6301\u4fee\u6539\u81ea\u589e",
+    "autoIncrementValueInvalid": "请输入大于 0 的整数",
+    "autoIncrementReset": "自增值已重置为 {0}",
+    "autoIncrementResetFailed": "重置自增失败：{0}",
     "mockRowCountPrompt": "\u8981\u751f\u6210\u7684 Mock \u6570\u636e\u884c\u6570",
     "mockRowCountInvalid": "\u8bf7\u8f93\u5165 1 \u5230 1000 \u4e4b\u95f4\u7684\u6574\u6570"
   },

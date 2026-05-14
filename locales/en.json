@@ -85,6 +85,7 @@
     "delete": "Delete",
     "cancel": "Cancel",
     "save": "Save",
+    "refresh": "Refresh",
     "retry": "Retry",
     "yes": "Yes",
     "no": "No"
@@ -214,6 +215,9 @@
     "foreignKeyCount": "Foreign Keys",
     "primaryKeys": "Primary Keys",
     "autoIncrementColumns": "Auto Increment Columns",
+    "nextAutoIncrement": "Next Auto Increment",
+    "resetAutoIncrement": "Reset Auto Increment",
+    "autoIncrementLeaveBlank": "Leave blank to auto generate",
     "nullableColumns": "Nullable Columns",
     "notNullColumns": "Not Null Columns",
     "length": "Length",
@@ -276,6 +280,9 @@
     "columnAlterNotSupported": "Column alteration is not supported for {0}",
     "primaryKeyAlterNotSupported": "Primary key alteration is not supported for {0}",
     "autoIncrementAlterNotSupported": "Changing auto increment is not supported for this driver",
+    "autoIncrementValueInvalid": "Enter an integer greater than 0",
+    "autoIncrementReset": "Auto increment reset to {0}",
+    "autoIncrementResetFailed": "Failed to reset auto increment: {0}",
     "mockRowCountPrompt": "Rows of mock data to generate",
     "mockRowCountInvalid": "Enter an integer from 1 to 1000"
   },

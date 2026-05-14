@@ -64,6 +64,14 @@ type TableSchemaReloadRequest = {
   objectType: SchemaObject['type']
 }
 
+type AutoIncrementResetRequest = {
+  profile: DbConnectionProfile
+  scope: SchemaScope
+  tableName: string
+  objectType: SchemaObject['type']
+  nextValue: unknown
+}
+
 type TableSchemaTab = 'fields' | 'indexes' | 'foreignKeys' | 'checks' | 'triggers' | 'options' | 'comment' | 'sql'
 
 type QueryExecutionContext = {
@@ -1163,6 +1171,40 @@ export async function activate(context: ExtensionContext): Promise<void> {
         return undefined
       }
     }),
+    commands.registerCommand('dbNexus.resetAutoIncrement', async (request: AutoIncrementResetRequest): Promise<TableSchema | undefined> => {
+      if (!request || request.objectType !== 'table') {
+        window.showWarningMessage(t('table.selectTable'))
+        return undefined
+      }
+
+      const nextValue = Number(request.nextValue)
+      if (!Number.isInteger(nextValue) || nextValue < 1) {
+        window.showWarningMessage(t('table.autoIncrementValueInvalid'))
+        return undefined
+      }
+
+      const driver = driverRegistry.getDriver(request.profile.driverId)
+      if (!driver?.getTableSchema) {
+        window.showErrorMessage(t('table.schemaNotSupported'))
+        return undefined
+      }
+
+      try {
+        await executeSql(
+          request.profile,
+          buildResetAutoIncrementSql(request.profile.driverId, request.scope, request.tableName, nextValue),
+          request.scope
+        )
+        connectionsTreeProvider?.refreshTable(request.profile, request.tableName, request.scope)
+        const schema = await driver.getTableSchema(request.profile, request.tableName, request.scope)
+        window.showInformationMessage(t('table.autoIncrementReset', nextValue))
+        return schema
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error)
+        window.showErrorMessage(t('table.autoIncrementResetFailed', message))
+        return undefined
+      }
+    }),
     commands.registerCommand('dbNexus.addColumn', async (node: SchemaNode | TableDetailGroupNode | TableTarget | undefined) => {
       const target = await resolveTableTarget(node)
       if (!target) return
@@ -2244,6 +2286,18 @@ function quoteSqlIdentifier(driverId: DatabaseDriverId, identifier: string): str
     return `\`${text.replace(/`/g, '``')}\``
   }
   return `"${text.replace(/"/g, '""')}"`
+}
+
+function buildResetAutoIncrementSql(
+  driverId: DatabaseDriverId,
+  scope: SchemaScope,
+  tableName: string,
+  nextValue: number
+): string {
+  if (driverId !== 'mysql' && driverId !== 'mariadb') {
+    throw new Error(t('table.autoIncrementAlterNotSupported'))
+  }
+  return `ALTER TABLE ${getQualifiedObjectName(driverId, scope, tableName)} AUTO_INCREMENT = ${nextValue};`
 }
 
 function buildInsertTemplate(
