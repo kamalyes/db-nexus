@@ -279,7 +279,7 @@ export class SqlEditorPanel {
       suggestions.push({ value, insertText, kind, detail, tableName, schemaName })
     }
 
-    schemas.forEach(schemaName => addSuggestion(schemaName, 'schema', 'schema'))
+    schemas.forEach(schemaName => addSuggestion(schemaName, 'schema', 'schema', schemaName, undefined, schemaName))
 
     try {
       const driver = this.driverRegistry.getDriver(profile.driverId)
@@ -293,14 +293,17 @@ export class SqlEditorPanel {
         const detail = objectSchema && object.type !== 'schema'
           ? `${object.type} - ${objectSchema}`
           : object.type
-        addSuggestion(object.name, object.type, detail)
+        const tableName = object.type === 'table' || object.type === 'view' || object.type === 'materializedView'
+          ? object.name
+          : undefined
+        addSuggestion(object.name, object.type, detail, object.name, tableName, objectSchema)
         if (object.type === 'table' || object.type === 'view' || object.type === 'materializedView') {
           tableObjects.push(object)
         }
       }
 
       if (driver.getTableSchema) {
-        for (const object of tableObjects.slice(0, 80)) {
+        for (const object of this.prioritizeTableObjectsForSql(tableObjects).slice(0, 120)) {
           const objectSchema = object.scope?.schema || metadataSchema
           try {
             const tableSchema = await driver.getTableSchema(profile, object.name, { database, schema: objectSchema })
@@ -308,7 +311,7 @@ export class SqlEditorPanel {
               addSuggestion(
                 column.name,
                 'column',
-                `${object.name} · ${column.type}`,
+                `${object.name} - ${column.type}`,
                 column.name,
                 object.name,
                 objectSchema
@@ -324,6 +327,45 @@ export class SqlEditorPanel {
     }
 
     return suggestions
+  }
+
+  private prioritizeTableObjectsForSql(tableObjects: SchemaObject[]): SchemaObject[] {
+    const referencedTables = this.extractReferencedTables(this.sql)
+    if (referencedTables.size === 0) {
+      return tableObjects
+    }
+
+    return [...tableObjects].sort((left, right) => {
+      const leftScore = referencedTables.has(this.normalizeSqlIdentifier(left.name)) ? 0 : 1
+      const rightScore = referencedTables.has(this.normalizeSqlIdentifier(right.name)) ? 0 : 1
+      if (leftScore !== rightScore) {
+        return leftScore - rightScore
+      }
+      return left.name.localeCompare(right.name)
+    })
+  }
+
+  private extractReferencedTables(sql: string): Set<string> {
+    const tables = new Set<string>()
+    const regex = /\b(?:from|join|update|into)\s+([`"\[]?[A-Za-z0-9_$.-]+[`"\]]?)/gi
+    let match: RegExpExecArray | null
+    while ((match = regex.exec(sql))) {
+      const tableName = this.normalizeSqlIdentifier(match[1])
+      if (tableName) {
+        tables.add(tableName)
+      }
+    }
+    return tables
+  }
+
+  private normalizeSqlIdentifier(value: string): string {
+    return String(value || '')
+      .trim()
+      .replace(/^[`"\[]+|[`"\]]+$/g, '')
+      .split('.')
+      .pop()
+      ?.replace(/^[`"\[]+|[`"\]]+$/g, '')
+      .toLowerCase() || ''
   }
 
   private getAutocompleteSchema(profile: DbConnectionProfile, schemas: string[]): string | undefined {
@@ -811,8 +853,11 @@ export class SqlEditorPanel {
       'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP', 'FROM', 'WHERE',
       'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 'ON', 'GROUP', 'ORDER', 'BY', 'HAVING',
       'LIMIT', 'OFFSET', 'VALUES', 'SET', 'INTO', 'AND', 'OR', 'NOT', 'NULL', 'IS',
-      'DISTINCT', 'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END'
+      'DISTINCT', 'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END',
+      'AS', 'ASC', 'DESC', 'UNION', 'ALL', 'EXISTS', 'BETWEEN', 'LIKE', 'IN', 'TRUE', 'FALSE',
+      'COALESCE', 'CAST', 'CURRENT_TIMESTAMP', 'NOW'
     ];
+    const sqlKeywordSet = new Set(sqlKeywords.map(keyword => keyword.toLowerCase()));
     let initialized = false;
     let currentState = {
       suggestions: [],
@@ -922,10 +967,24 @@ export class SqlEditorPanel {
         end++;
       }
 
+      let qualifier = '';
+      let qualifierStart = start;
+      if (start > 0 && text.charAt(start - 1) === '.') {
+        let qStart = start - 1;
+        while (qStart > 0 && /[A-Za-z0-9_$]/.test(text.charAt(qStart - 1))) {
+          qStart--;
+        }
+        qualifier = text.slice(qStart, start - 1);
+        qualifierStart = qStart;
+      }
+
       return {
         start,
         end,
-        prefix: text.slice(start, position)
+        prefix: text.slice(start, position),
+        qualifier,
+        qualifierStart,
+        previousChar: text.charAt(start - 1)
       };
     }
 
@@ -942,23 +1001,46 @@ export class SqlEditorPanel {
     }
 
     function statementBeforeCursor(range) {
-      const before = editor.value.slice(0, range.start);
+      const anchor = range.qualifier ? range.qualifierStart : range.start;
+      const before = editor.value.slice(0, anchor);
       const lastSemicolon = before.lastIndexOf(';');
       return before.slice(lastSemicolon + 1);
     }
 
-    function referencedTables(range) {
+    function isSqlKeyword(value) {
+      return sqlKeywordSet.has(String(value || '').toLowerCase());
+    }
+
+    function isTableLike(item) {
+      return item.kind === 'table' || item.kind === 'view' || item.kind === 'materializedView';
+    }
+
+    function tableReferences(range) {
       const statement = statementBeforeCursor(range);
-      const tables = [];
+      const references = [];
       const tick = String.fromCharCode(96);
-      const regex = new RegExp('\\\\b(?:from|join|update|into)\\\\s+([' + tick + '"\\\\[]?[A-Za-z0-9_$.-]+[' + tick + '"\\\\]]?)', 'gi');
+      const identifier = '[' + tick + '"\\\\[]?[A-Za-z0-9_$-]+[' + tick + '"\\\\]]?';
+      const qualifiedIdentifier = identifier + '(?:\\\\s*\\\\.\\\\s*' + identifier + '){0,2}';
+      const aliasStop = '(?!(?:on|where|join|left|right|inner|outer|full|cross|group|order|having|limit|offset|set|values)\\\\b)';
+      const regex = new RegExp('\\\\b(?:from|join|update|into)\\\\s+(' + qualifiedIdentifier + ')(?:\\\\s+(?:as\\\\s+)?' + aliasStop + '([A-Za-z_][A-Za-z0-9_$]*))?', 'gi');
       let match;
       while ((match = regex.exec(statement))) {
         const table = normalizeIdentifier(match[1]);
-        if (table && !tables.includes(table)) {
-          tables.push(table);
+        const alias = match[2] && !isSqlKeyword(match[2]) ? normalizeIdentifier(match[2]) : '';
+        if (table) {
+          references.push({ table, alias, raw: match[1] });
         }
       }
+      return references;
+    }
+
+    function referencedTables(range) {
+      const tables = [];
+      tableReferences(range).forEach(reference => {
+        if (reference.table && !tables.includes(reference.table)) {
+          tables.push(reference.table);
+        }
+      });
       return tables;
     }
 
@@ -969,21 +1051,83 @@ export class SqlEditorPanel {
       return regex.test(before);
     }
 
-    function suggestionPoolForContext(range) {
-      const tableContext = isTableNameContext(range);
-      const tables = referencedTables(range);
-      const keywords = allSuggestions.filter(item => item.kind === 'keyword');
-      const tableLike = allSuggestions.filter(item => item.kind === 'table' || item.kind === 'view' || item.kind === 'materializedView');
-      const scopedColumns = allSuggestions.filter(item => {
+    function currentClause(range) {
+      const before = statementBeforeCursor(range).toLowerCase();
+      const clauseRegex = /\\b(select|from|join|on|where|group\\s+by|order\\s+by|having|set|values|into|update)\\b/g;
+      let match;
+      let clause = '';
+      while ((match = clauseRegex.exec(before))) {
+        clause = match[1].replace(/\\s+/g, ' ');
+      }
+      return clause;
+    }
+
+    function qualifierTarget(range) {
+      const qualifier = normalizeIdentifier(range.qualifier);
+      if (!qualifier) return '';
+
+      const references = tableReferences(range);
+      const reference = references.find(item => item.alias === qualifier || item.table === qualifier);
+      if (reference) {
+        return reference.table;
+      }
+
+      const table = allSuggestions.find(item => isTableLike(item) && normalizeIdentifier(item.value) === qualifier);
+      return table ? normalizeIdentifier(table.value) : '';
+    }
+
+    function columnsForTables(tables) {
+      return allSuggestions.filter(item => {
         if (item.kind !== 'column') return false;
         if (tables.length === 0) return true;
         return tables.includes(normalizeIdentifier(item.tableName));
       });
+    }
+
+    function isColumnNameContext(range) {
+      if (range.qualifier) return true;
+      if (isTableNameContext(range)) return false;
+
+      const clause = currentClause(range);
+      if (['select', 'where', 'on', 'group by', 'order by', 'having', 'set'].includes(clause)) {
+        return true;
+      }
+
+      return referencedTables(range).length > 0;
+    }
+
+    function shouldShowEmptyPrefix(range) {
+      if (range.qualifier) return true;
+      if (isTableNameContext(range)) return true;
+      if (!isColumnNameContext(range)) return false;
+
+      const before = statementBeforeCursor(range);
+      return /(?:^|[\\s,(=<>+\\-*])$/.test(before);
+    }
+
+    function suggestionPoolForContext(range) {
+      const tableContext = isTableNameContext(range);
+      const tables = referencedTables(range);
+      const keywords = allSuggestions.filter(item => item.kind === 'keyword');
+      const tableLike = allSuggestions.filter(isTableLike);
+      const schemaLike = allSuggestions.filter(item => item.kind === 'schema');
 
       if (tableContext) {
-        return tableLike.concat(keywords);
+        const schemaQualifier = normalizeIdentifier(range.qualifier);
+        const scopedTables = schemaQualifier
+          ? tableLike.filter(item => normalizeIdentifier(item.schemaName) === schemaQualifier)
+          : tableLike;
+        return (scopedTables.length > 0 ? scopedTables : tableLike).concat(schemaLike, keywords);
       }
-      if (scopedColumns.length > 0) {
+
+      if (range.qualifier) {
+        const target = qualifierTarget(range);
+        const qualifiedColumns = target ? columnsForTables([target]) : columnsForTables([normalizeIdentifier(range.qualifier)]);
+        return qualifiedColumns.concat(keywords);
+      }
+
+      const scopedColumns = columnsForTables(tables);
+      if (isColumnNameContext(range) && scopedColumns.length > 0) {
         return scopedColumns.concat(keywords, tableLike);
       }
       return allSuggestions;
@@ -1035,25 +1179,38 @@ export class SqlEditorPanel {
 
       const range = getCurrentWordRange();
       const prefix = range.prefix.trim();
-      if (prefix.length === 0) {
+      if (prefix.length === 0 && !shouldShowEmptyPrefix(range)) {
         hideSuggestions();
         return;
       }
 
       const lower = prefix.toLowerCase();
       visibleSuggestions = suggestionPoolForContext(range)
-        .filter(item => item.value.toLowerCase().includes(lower) && item.value.toLowerCase() !== lower)
+        .filter(item => {
+          const value = item.value.toLowerCase();
+          if (lower.length === 0) return true;
+          return value.includes(lower) && value !== lower;
+        })
         .sort((a, b) => {
-          const kindRank = { column: 0, table: 1, view: 1, materializedView: 1, keyword: 2 };
+          const tableContext = isTableNameContext(range);
+          const columnContext = isColumnNameContext(range);
+          const kindRank = tableContext
+            ? { table: 0, view: 0, materializedView: 0, schema: 1, keyword: 2, column: 3 }
+            : columnContext
+              ? { column: 0, keyword: 1, table: 2, view: 2, materializedView: 2, schema: 3 }
+              : { keyword: 0, table: 1, view: 1, materializedView: 1, column: 2, schema: 3 };
           const aRank = kindRank[a.kind] == null ? 3 : kindRank[a.kind];
           const bRank = kindRank[b.kind] == null ? 3 : kindRank[b.kind];
           if (aRank !== bRank) return aRank - bRank;
           const aStarts = a.value.toLowerCase().startsWith(lower) ? 0 : 1;
           const bStarts = b.value.toLowerCase().startsWith(lower) ? 0 : 1;
           if (aStarts !== bStarts) return aStarts - bStarts;
+          const aSameTable = range.qualifier && normalizeIdentifier(a.tableName) === qualifierTarget(range) ? 0 : 1;
+          const bSameTable = range.qualifier && normalizeIdentifier(b.tableName) === qualifierTarget(range) ? 0 : 1;
+          if (aSameTable !== bSameTable) return aSameTable - bSameTable;
           return a.value.localeCompare(b.value);
         })
-        .slice(0, 8);
+        .slice(0, 12);
 
       if (visibleSuggestions.length === 0) {
         hideSuggestions();
