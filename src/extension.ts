@@ -913,9 +913,25 @@ export async function activate(context: ExtensionContext): Promise<void> {
     }).then(undefined, () => undefined)
   }
 
+  const openSelectedDisconnectedConnection = (node: unknown): void => {
+    if (!(node instanceof ConnectionNode)) return
+
+    setTimeout(() => {
+      if (connectionsTreeView?.selection?.[0] !== node) return
+
+      const status = connectionStatusManager.getStatus(node.profile.id)?.status
+      if (status === 'connected' || status === 'connecting') return
+
+      void openDatabase(node)
+    }, 75)
+  }
+
   context.subscriptions.push(
     outputChannel,
     connectionsTreeView,
+    connectionsTreeView.onDidChangeSelection(event => {
+      openSelectedDisconnectedConnection(event.selection[0])
+    }),
     commands.registerCommand('dbNexus.refreshConnections', () => {
       connectionsTreeProvider?.refresh()
     }),

@@ -48,6 +48,7 @@ export class SqlEditorPanel {
   private readonly title: string | undefined
   private readonly contextLabel: string | undefined
   private uri: Uri | undefined
+  private stateRequestId = 0
 
   static show(
     context: ExtensionContext,
@@ -99,7 +100,7 @@ export class SqlEditorPanel {
 
   private async handleMessage(message: { type?: string; [key: string]: unknown }): Promise<void> {
     if (message.type === 'ready') {
-      await this.postState()
+      await this.postFastStateThenMetadata()
       return
     }
 
@@ -108,20 +109,20 @@ export class SqlEditorPanel {
       this.scope = {
         database: this.selectedProfile?.database
       }
-      await this.postState()
+      await this.postFastStateThenMetadata()
       return
     }
 
     if (message.type === 'selectDatabase' && typeof message.database === 'string') {
       this.scope.database = message.database || undefined
       this.scope.schema = undefined
-      await this.postState()
+      await this.postFastStateThenMetadata()
       return
     }
 
     if (message.type === 'selectSchema' && typeof message.schema === 'string') {
       this.scope.schema = message.schema || undefined
-      await this.postState()
+      await this.postFastStateThenMetadata()
       return
     }
 
@@ -148,36 +149,61 @@ export class SqlEditorPanel {
     }
 
     if (message.type === 'refreshMetadata') {
-      await this.postState()
+      await this.postState({ includeMetadata: true })
     }
   }
 
-  private async postState(): Promise<void> {
+  private async postFastStateThenMetadata(): Promise<void> {
+    await this.postState({ includeMetadata: false })
+    void this.postState({ includeMetadata: true })
+  }
+
+  private async postState(options: { includeMetadata: boolean }): Promise<void> {
+    const requestId = ++this.stateRequestId
+    const state = await this.getState(options)
+    if (requestId !== this.stateRequestId) {
+      return
+    }
     this.panel.webview.postMessage({
       type: 'state',
-      state: await this.getState()
+      state
     })
   }
 
-  private async getState(): Promise<SqlEditorState> {
+  private async getState(options: { includeMetadata: boolean }): Promise<SqlEditorState> {
     const connections = this.connectionService.getConnections()
     if (!this.selectedProfile) {
       this.selectedProfile = connections[0]
     }
 
-    const databases = await this.loadDatabases(this.selectedProfile)
-    if (!this.scope.database) {
-      this.scope.database = this.selectedProfile?.database || databases[0]
-    }
+    let databases = this.scope.database
+      ? [this.scope.database]
+      : this.selectedProfile?.database
+        ? [this.selectedProfile.database]
+        : []
+    let schemas = this.scope.schema ? [this.scope.schema] : []
+    let suggestions: SqlSuggestion[] = []
 
-    const schemas = await this.loadSchemas(this.selectedProfile, this.scope.database)
-    if (schemas.length === 0) {
-      this.scope.schema = undefined
-    } else if (this.scope.schema && !schemas.includes(this.scope.schema)) {
-      this.scope.schema = undefined
-    }
+    if (options.includeMetadata) {
+      databases = await this.loadDatabases(this.selectedProfile)
+      if (!this.scope.database) {
+        this.scope.database = this.selectedProfile?.database || databases[0]
+      }
 
-    const suggestions = await this.loadSuggestions(this.selectedProfile, this.scope.database, this.scope.schema, schemas)
+      schemas = await this.loadSchemas(this.selectedProfile, this.scope.database)
+      if (schemas.length === 0) {
+        this.scope.schema = undefined
+      } else if (this.scope.schema && !schemas.includes(this.scope.schema)) {
+        this.scope.schema = undefined
+      }
+
+      databases = this.withSelectedValue(databases, this.scope.database)
+      schemas = this.withSelectedValue(schemas, this.scope.schema)
+      suggestions = await this.loadSuggestions(this.selectedProfile, this.scope.database, this.scope.schema, schemas)
+    } else {
+      databases = this.withSelectedValue(databases, this.scope.database)
+      schemas = this.withSelectedValue(schemas, this.scope.schema)
+    }
 
     return {
       connections: connections.map(profile => ({
@@ -196,6 +222,13 @@ export class SqlEditorPanel {
       title: this.uri ? this.getFileName(this.uri) : this.title || 'SQL Scratch',
       contextLabel: this.contextLabel || (this.selectedProfile ? this.getContextLabel(this.selectedProfile) : '')
     }
+  }
+
+  private withSelectedValue(values: string[], selectedValue: string | undefined): string[] {
+    if (!selectedValue || values.includes(selectedValue)) {
+      return values
+    }
+    return [selectedValue, ...values]
   }
 
   private async loadDatabases(profile: DbConnectionProfile | undefined): Promise<string[]> {
@@ -370,7 +403,7 @@ export class SqlEditorPanel {
     await workspace.fs.writeFile(this.uri, new TextEncoder().encode(this.sql.endsWith('\n') ? this.sql : `${this.sql}\n`))
     this.panel.title = this.getFileName(this.uri)
     this.panel.webview.postMessage({ type: 'status', message: `Saved ${this.uri.fsPath}` })
-    await this.postState()
+    await this.postState({ includeMetadata: false })
   }
 
   private toWebviewResult(result: QueryResult): QueryResult {

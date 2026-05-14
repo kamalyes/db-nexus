@@ -309,18 +309,10 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
   }
 
   private getConnectionCommand(node: ConnectionNode, status: ConnectionStatusType): TreeItem['command'] {
-    if (status === 'connected') {
+    if (status === 'connected' || status === 'disconnected' || status === 'error') {
       return {
         command: 'dbNexus.openDatabase',
         title: t('connection.openDatabase'),
-        arguments: [node]
-      }
-    }
-
-    if (status === 'disconnected' || status === 'error') {
-      return {
-        command: 'dbNexus.connectConnection',
-        title: t('dashboard.actions.connect'),
         arguments: [node]
       }
     }
