@@ -177,6 +177,7 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
   private readonly onDidChangeTreeDataEmitter = new EventEmitter<ConnectionTreeNode | undefined>()
   readonly onDidChangeTreeData: Event<ConnectionTreeNode | undefined> = this.onDidChangeTreeDataEmitter.event
   private readonly tableSchemaCache = new Map<string, Promise<TableSchema>>()
+  private readonly autoConnectPromises = new Map<string, Promise<boolean>>()
   private treeGeneration = 0
 
   constructor(
@@ -629,7 +630,14 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
     try {
       const status = connectionStatusManager.getStatus(node.profile.id)
       if (status?.status !== 'connected') {
-        return [new PlaceholderNode(t('dashboard.statusDisconnected'))]
+        const connected = await this.ensureConnectedForExpansion(node.profile)
+        if (!connected) {
+          const latestStatus = connectionStatusManager.getStatus(node.profile.id)
+          const message = latestStatus?.error
+            ? t('connection.connectFailed', latestStatus.error)
+            : t('dashboard.statusDisconnected')
+          return [new PlaceholderNode(message)]
+        }
       }
 
       if (this.shouldShowDatabaseCatalog(node.profile.driverId)) {
@@ -657,6 +665,44 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       return [new PlaceholderNode(t('connection.loadError', message))]
+    }
+  }
+
+  private async ensureConnectedForExpansion(profile: DbConnectionProfile): Promise<boolean> {
+    if (connectionStatusManager.isConnected(profile.id)) {
+      return true
+    }
+
+    const existing = this.autoConnectPromises.get(profile.id)
+    if (existing) {
+      return existing
+    }
+
+    const promise = this.connectForTreeExpansion(profile)
+    this.autoConnectPromises.set(profile.id, promise)
+
+    try {
+      return await promise
+    } finally {
+      this.autoConnectPromises.delete(profile.id)
+    }
+  }
+
+  private async connectForTreeExpansion(profile: DbConnectionProfile): Promise<boolean> {
+    connectionStatusManager.setStatus(profile.id, 'connecting')
+    try {
+      const result = await this.connectionService.testConnection(profile)
+      if (result.ok) {
+        connectionStatusManager.setStatus(profile.id, 'connected', result.latencyMs)
+        return true
+      }
+
+      connectionStatusManager.setStatus(profile.id, 'error', undefined, result.message)
+      return false
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      connectionStatusManager.setStatus(profile.id, 'error', undefined, message)
+      return false
     }
   }
 
