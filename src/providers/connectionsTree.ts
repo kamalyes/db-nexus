@@ -400,7 +400,7 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
     const item = new TreeItem(node.schemaObject.name, node.collapsibleState)
     item.id = this.getTreeItemId('schema', node.connectionProfile.id, this.getScopeId(node.scope), node.schemaObject.type, node.schemaObject.name)
     item.description = this.getSchemaDescription(node.schemaObject)
-    item.tooltip = node.schemaObject.description || node.schemaObject.name
+    item.tooltip = this.getSchemaTooltip(node.schemaObject)
     item.iconPath = this.getIconForType(node.schemaObject.type)
     item.contextValue = node.schemaObject.type
     
@@ -424,7 +424,7 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
 
   private getSchemaDescription(schemaObject: SchemaObject): string | undefined {
     if (schemaObject.rowCount !== undefined) {
-      return String(schemaObject.rowCount)
+      return `~${this.formatRowCount(schemaObject.rowCount)}`
     }
     if (schemaObject.type === 'schema') {
       return 'schema'
@@ -433,6 +433,21 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
       return 'view'
     }
     return undefined
+  }
+
+  private getSchemaTooltip(schemaObject: SchemaObject): string {
+    const lines = [schemaObject.name]
+    if (schemaObject.description && schemaObject.description !== schemaObject.name) {
+      lines.push(schemaObject.description)
+    }
+    if (schemaObject.rowCount !== undefined) {
+      lines.push(`${t('table.estimatedRows')}: ${this.formatRowCount(schemaObject.rowCount)}`)
+    }
+    return lines.join('\n')
+  }
+
+  private formatRowCount(value: number): string {
+    return Number.isFinite(value) ? value.toLocaleString() : String(value)
   }
 
   private getTablesGroupTreeItem(node: TablesGroupNode): TreeItem {

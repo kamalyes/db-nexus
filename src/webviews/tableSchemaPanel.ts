@@ -189,12 +189,12 @@ export class TableSchemaPanel {
     const nullableColumns = schema.columns.filter(column => column.nullable).length
     const notNullColumns = schema.columns.length - nullableColumns
     const loadedAt = panelContext.loadedAt || new Date().toISOString()
-    const tableRows = panelContext.rowCount ?? metadata.tableRows
+    const estimatedRows = metadata.tableRows ?? panelContext.rowCount
     const dataLength = toNumber(metadata.dataLength)
     const indexLength = toNumber(metadata.indexLength)
     const totalLength = toNumber(metadata.totalLength)
-    const averageRowLength = toNumber(tableRows) && dataLength
-      ? dataLength / Number(tableRows)
+    const averageRowLength = toNumber(estimatedRows) && dataLength
+      ? dataLength / Number(estimatedRows)
       : undefined
     const columnDetails = schema.columns.map(column => {
       const typeParts = getTypeParts(column.type)
@@ -320,7 +320,7 @@ export class TableSchemaPanel {
       renderInfoSection(t('table.performanceInfo'), [
         [t('table.schemaLoadTime'), formatDuration(panelContext.schemaLoadMs)],
         [t('table.loadedAt'), formatDateTime(loadedAt)],
-        [t('table.estimatedRows'), tableRows],
+        [t('table.estimatedRows'), estimatedRows],
         [t('table.averageRowLength'), formatBytes(averageRowLength)],
         [t('table.dataLength'), formatBytes(dataLength)],
         [t('table.indexLength'), formatBytes(indexLength)],
@@ -329,7 +329,6 @@ export class TableSchemaPanel {
       ]),
       renderInfoSection(t('table.tableInfo'), [
         [t('table.objectType'), objectType],
-        [t('table.rowCount'), panelContext.rowCount ?? metadata.tableRows],
         [t('table.owner'), metadata.owner],
         [t('table.engine'), metadata.engine],
         [t('table.autoIncrement'), metadata.autoIncrement],
