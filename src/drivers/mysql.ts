@@ -182,6 +182,7 @@ export class MySQLDriver implements DatabaseDriver {
     const qualifiedTable = this.getQualifiedTableName(profile, tableName, scope)
 
     let sql = `SELECT * FROM ${qualifiedTable}`
+    let whereSql = ''
 
     if (options?.filters && options.filters.length > 0) {
       const whereClauses = options.filters.map(filter => {
@@ -195,7 +196,8 @@ export class MySQLDriver implements DatabaseDriver {
         }
         return `${column} ${filter.operator} ${this.formatValue(filter.value)}`
       })
-      sql += ` WHERE ${whereClauses.join(' AND ')}`
+      whereSql = ` WHERE ${whereClauses.join(' AND ')}`
+      sql += whereSql
     }
 
     if (options?.sorts && options.sorts.length > 0) {
@@ -210,7 +212,7 @@ export class MySQLDriver implements DatabaseDriver {
     sql += ` LIMIT ${limit} OFFSET ${offset}`
 
     const [rows, fields] = await pool.query(sql)
-    const [countRows] = await pool.query(`SELECT COUNT(*) as total FROM ${qualifiedTable}`)
+    const [countRows] = await pool.query(`SELECT COUNT(*) as total FROM ${qualifiedTable}${whereSql}`)
 
     const columns = Array.isArray(fields)
       ? fields.map(field => ({
@@ -435,18 +437,21 @@ export class MySQLDriver implements DatabaseDriver {
     row: Record<string, unknown>,
     scope: SchemaScope
   ): Promise<MutationPlan> {
-    const database = scope.database || profile.database
-    const qualifiedTable = `${database}.${table}`
+    const qualifiedTable = this.getQualifiedTableName(profile, table, scope)
 
-    const columns = Object.keys(row).map(c => `\`${c}\``).join(', ')
-    const params = Object.keys(row).map(() => '?').join(', ')
-    const sql = `INSERT INTO ${qualifiedTable} (${columns}) VALUES (${params})`
+    const rowColumns = Object.keys(row)
+    const columns = rowColumns.map(c => this.quoteIdentifier(c)).join(', ')
+    const params = rowColumns.map(() => '?').join(', ')
+    const sql = rowColumns.length === 0
+      ? `INSERT INTO ${qualifiedTable} () VALUES ()`
+      : `INSERT INTO ${qualifiedTable} (${columns}) VALUES (${params})`
 
     return {
       table,
-      schema: database,
+      database: scope.database || profile.database,
       type: 'insert',
       sql,
+      parameters: Object.values(row),
       description: `Insert new row into ${qualifiedTable}`
     }
   }
@@ -458,8 +463,7 @@ export class MySQLDriver implements DatabaseDriver {
     originalRow: Record<string, unknown>,
     scope: SchemaScope
   ): Promise<MutationPlan> {
-    const database = scope.database || profile.database
-    const qualifiedTable = `${database}.${table}`
+    const qualifiedTable = this.getQualifiedTableName(profile, table, scope)
 
     const tableSchema = await this.getTableSchema!(profile, table, scope)
     const primaryKeyColumns = tableSchema.columns.filter(c => c.isPrimaryKey).map(c => c.name)
@@ -468,8 +472,9 @@ export class MySQLDriver implements DatabaseDriver {
       throw new Error('Cannot update table without primary key')
     }
 
-    const setClauses = Object.keys(row)
+    const setColumns = Object.keys(row)
       .filter(k => !primaryKeyColumns.includes(k))
+    const setClauses = setColumns
       .map(k => `\`${k}\` = ?`)
       .join(', ')
 
@@ -478,9 +483,13 @@ export class MySQLDriver implements DatabaseDriver {
 
     return {
       table,
-      schema: database,
+      database: scope.database || profile.database,
       type: 'update',
       sql,
+      parameters: [
+        ...setColumns.map(column => row[column]),
+        ...primaryKeyColumns.map(column => originalRow[column])
+      ],
       description: `Update row in ${qualifiedTable}`
     }
   }
@@ -491,8 +500,7 @@ export class MySQLDriver implements DatabaseDriver {
     row: Record<string, unknown>,
     scope: SchemaScope
   ): Promise<MutationPlan> {
-    const database = scope.database || profile.database
-    const qualifiedTable = `${database}.${table}`
+    const qualifiedTable = this.getQualifiedTableName(profile, table, scope)
 
     const tableSchema = await this.getTableSchema!(profile, table, scope)
     const primaryKeyColumns = tableSchema.columns.filter(c => c.isPrimaryKey).map(c => c.name)
@@ -506,9 +514,10 @@ export class MySQLDriver implements DatabaseDriver {
 
     return {
       table,
-      schema: database,
+      database: scope.database || profile.database,
       type: 'delete',
       sql,
+      parameters: primaryKeyColumns.map(column => row[column]),
       description: `Delete row from ${qualifiedTable}`
     }
   }
@@ -518,7 +527,7 @@ export class MySQLDriver implements DatabaseDriver {
     plan: MutationPlan
   ): Promise<DataEditResult> {
     const pool = await this.getPool(profile)
-    const values = Object.values({ ...plan, table: undefined, schema: undefined, type: undefined, sql: undefined, description: undefined })
+    const values = plan.parameters || []
 
     try {
       const [result] = await pool.query(plan.sql, values)

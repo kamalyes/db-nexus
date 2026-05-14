@@ -15,6 +15,8 @@ export class TableDataPanel {
   private _currentPage: number = 1
   private _pageSize: number = 50
   private _totalRows: number = 0
+  private _totalRowsKnown: boolean = true
+  private _hasMoreRows: boolean = false
   private _filters: { column: string; operator: string; value: string }[] = []
   private _sorts: { column: string; direction: 'ASC' | 'DESC' }[] = []
   private _disposed = false
@@ -93,11 +95,11 @@ export class TableDataPanel {
             await this._loadData()
             break
           case 'pageChange':
-            this._currentPage = message.page
+            this._currentPage = Math.max(1, Number(message.page) || 1)
             await this._loadData()
             break
           case 'pageSizeChange':
-            this._pageSize = message.pageSize
+            this._pageSize = Math.max(1, Number(message.pageSize) || 50)
             this._currentPage = 1
             await this._loadData()
             break
@@ -108,6 +110,7 @@ export class TableDataPanel {
             break
           case 'sort':
             this._sorts = message.sorts || []
+            this._currentPage = 1
             await this._loadData()
             break
           case 'insert':
@@ -171,7 +174,28 @@ export class TableDataPanel {
         return
       }
 
-      this._totalRows = result.totalRows || result.rowCount
+      const explicitTotalRows = typeof result.totalRows === 'number' && Number.isFinite(result.totalRows)
+        ? Math.max(0, result.totalRows)
+        : undefined
+      const loadedEnd = (this._currentPage - 1) * this._pageSize + result.rows.length
+
+      if (
+        explicitTotalRows !== undefined
+        && result.rows.length === 0
+        && this._currentPage > 1
+        && explicitTotalRows > 0
+        && (this._currentPage - 1) * this._pageSize >= explicitTotalRows
+      ) {
+        this._currentPage = Math.max(1, Math.ceil(explicitTotalRows / this._pageSize))
+        await this._loadData()
+        return
+      }
+
+      this._totalRowsKnown = explicitTotalRows !== undefined
+      this._hasMoreRows = typeof result.hasMore === 'boolean'
+        ? result.hasMore
+        : result.rows.length >= this._pageSize
+      this._totalRows = explicitTotalRows ?? Math.max(this._totalRows, loadedEnd + (this._hasMoreRows ? 1 : 0))
 
       this._setHtml(this._getEditableGridHtml(result))
     } catch (error: unknown) {
@@ -419,16 +443,36 @@ export class TableDataPanel {
   }
 
   private _getEditableGridHtml(result: QueryResult): string {
-    const columns = result.columns.map(c => c.name)
+    const schemaColumns = this._schema?.columns.map(column => column.name) || []
+    const columns = result.columns.length > 0 ? result.columns.map(c => c.name) : schemaColumns
     const rows = result.rows
-    const totalPages = Math.max(1, Math.ceil(this._totalRows / this._pageSize))
+    const offset = (this._currentPage - 1) * this._pageSize
+    const totalPages = this._totalRowsKnown
+      ? Math.max(1, Math.ceil(this._totalRows / this._pageSize))
+      : Math.max(1, this._currentPage + (this._hasMoreRows ? 1 : 0))
+    const canGoNext = this._hasMoreRows || (this._totalRowsKnown && this._currentPage < totalPages)
+    const canGoLast = this._totalRowsKnown && this._currentPage < totalPages
+    const pageInfo = this._totalRowsKnown
+      ? `Page ${this._currentPage} of ${totalPages}`
+      : `Page ${this._currentPage}${this._hasMoreRows ? ' · more rows available' : ''}`
+    const statsText = this._totalRowsKnown
+      ? `${this._totalRows.toLocaleString()} rows total`
+      : rows.length > 0
+        ? `${(offset + 1).toLocaleString()}-${(offset + rows.length).toLocaleString()} rows${this._hasMoreRows ? '+' : ''}`
+        : '0 rows'
     const primaryKeyColumns = this._schema?.columns.filter(c => c.isPrimaryKey).map(c => c.name) || []
     const canEdit = primaryKeyColumns.length > 0
+    const canInsert = !!(this._driver.planInsert && this._driver.executeMutation && this._schema)
+    const canDelete = !!(canEdit && this._driver.planDelete && this._driver.executeMutation)
+    const insertColumns = (this._schema?.columns || [])
+      .filter(column => !column.isAutoIncrement)
+      .map(column => column.name)
     const defaultColumnWidth = 180
     const actionColumnWidth = 44
+    const actionColumnVisible = canEdit || canDelete
 
     const colgroup = [
-      canEdit ? `<col style="width: ${actionColumnWidth}px">` : '',
+      actionColumnVisible ? `<col style="width: ${actionColumnWidth}px">` : '',
       ...columns.map((column, index) => `<col data-col-index="${index}" style="width: ${defaultColumnWidth}px">`)
     ].join('')
 
@@ -447,9 +491,9 @@ export class TableDataPanel {
       `
     }).join('')
 
-    const bodyRows = rows.map((row, rowIndex) => `
+    const bodyRows = rows.length > 0 ? rows.map((row, rowIndex) => `
       <tr data-row-index="${rowIndex}">
-        ${canEdit ? `<td class="row-state" title="Edit status"><span class="row-marker"></span></td>` : ''}
+        ${actionColumnVisible ? `<td class="row-state" title="Row status"><span class="row-marker"></span></td>` : ''}
         ${columns.map((column, columnIndex) => {
           const value = row[column]
           const raw = value === null || value === undefined ? '' : String(value)
@@ -461,7 +505,28 @@ export class TableDataPanel {
           return `<td class="data-cell${readonly}" data-row-index="${rowIndex}" data-column="${this._escapeAttr(column)}" data-raw="${this._escapeAttr(raw)}">${displayValue}${rowHandle}</td>`
         }).join('')}
       </tr>
-    `).join('')
+    `).join('') : `
+      <tr class="empty-row">
+        <td class="empty-cell" colspan="${Math.max(1, columns.length + (actionColumnVisible ? 1 : 0))}">No rows on this page</td>
+      </tr>
+    `
+
+    const insertPanel = canInsert ? `
+  <div class="insert-panel hidden" id="insertPanel">
+    <div class="insert-grid">
+      ${insertColumns.map(column => `
+        <label>
+          <span>${this._escapeHtml(column)}</span>
+          <input data-insert-column="${this._escapeAttr(column)}" type="text">
+        </label>
+      `).join('')}
+    </div>
+    <div class="insert-actions">
+      <button id="insertSaveBtn">Insert</button>
+      <button id="insertCancelBtn" class="secondary">Cancel</button>
+    </div>
+  </div>
+    ` : ''
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -492,6 +557,38 @@ export class TableDataPanel {
     }
     .filter-bar {
       margin-bottom: 10px;
+    }
+    .insert-panel {
+      margin-bottom: 10px;
+      padding: 10px;
+      border: 1px solid var(--vscode-widget-border);
+      background: var(--vscode-editorGroupHeader-tabsBackground);
+    }
+    .insert-panel.hidden {
+      display: none;
+    }
+    .insert-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 8px;
+    }
+    .insert-grid label {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+    .insert-grid span {
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .insert-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      margin-top: 10px;
     }
     .stats {
       margin-left: auto;
@@ -609,6 +706,17 @@ export class TableDataPanel {
     tr:hover td {
       background: var(--vscode-list-hoverBackground);
     }
+    tr.selected-row td {
+      background: var(--vscode-list-activeSelectionBackground);
+      color: var(--vscode-list-activeSelectionForeground);
+    }
+    .empty-cell {
+      height: 96px;
+      text-align: center;
+      vertical-align: middle;
+      color: var(--vscode-descriptionForeground);
+      background: var(--vscode-editor-background);
+    }
     .data-cell {
       cursor: default;
     }
@@ -702,8 +810,12 @@ export class TableDataPanel {
 <body>
   <div class="toolbar">
     <button id="refreshBtn" class="secondary">${this._escapeHtml(t('common.retry'))}</button>
-    <div class="stats">${this._totalRows.toLocaleString()} rows total / Page ${this._currentPage} of ${totalPages}</div>
+    ${canInsert ? '<button id="addRowBtn">New Row</button>' : ''}
+    ${canDelete ? '<button id="deleteRowBtn" class="secondary" disabled>Delete Row</button>' : ''}
+    <div class="stats">${this._escapeHtml(statsText)} / ${this._escapeHtml(pageInfo)}</div>
   </div>
+
+  ${insertPanel}
 
   <div class="filter-bar">
     <select id="filterColumn">
@@ -731,7 +843,7 @@ export class TableDataPanel {
       <colgroup>${colgroup}</colgroup>
       <thead>
         <tr>
-          ${canEdit ? '<th></th>' : ''}
+          ${actionColumnVisible ? '<th></th>' : ''}
           ${headers}
         </tr>
       </thead>
@@ -742,9 +854,9 @@ export class TableDataPanel {
   <div class="pagination">
     <button id="firstPage" class="secondary" ${this._currentPage === 1 ? 'disabled' : ''}>First</button>
     <button id="prevPage" class="secondary" ${this._currentPage === 1 ? 'disabled' : ''}>Prev</button>
-    <span class="page-info">Page ${this._currentPage} of ${totalPages}</span>
-    <button id="nextPage" class="secondary" ${this._currentPage >= totalPages ? 'disabled' : ''}>Next</button>
-    <button id="lastPage" class="secondary" ${this._currentPage >= totalPages ? 'disabled' : ''}>Last</button>
+    <span class="page-info">${this._escapeHtml(pageInfo)}</span>
+    <button id="nextPage" class="secondary" ${canGoNext ? '' : 'disabled'}>Next</button>
+    <button id="lastPage" class="secondary" ${canGoLast ? '' : 'disabled'}>Last</button>
     <select id="pageSizeSelect">
       <option value="25" ${this._pageSize === 25 ? 'selected' : ''}>25 rows</option>
       <option value="50" ${this._pageSize === 50 ? 'selected' : ''}>50 rows</option>
@@ -767,10 +879,68 @@ export class TableDataPanel {
     const columns = ${this._escapeScriptJson(JSON.stringify(columns))};
     const primaryKeyColumns = ${this._escapeScriptJson(JSON.stringify(primaryKeyColumns))};
     const canEdit = ${canEdit ? 'true' : 'false'};
+    const canInsert = ${canInsert ? 'true' : 'false'};
+    const canDelete = ${canDelete ? 'true' : 'false'};
+    const insertColumns = ${this._escapeScriptJson(JSON.stringify(insertColumns))};
     const pendingUpdates = new Map();
+    let selectedRowIndex = null;
 
     document.getElementById('refreshBtn').addEventListener('click', () => {
       vscode.postMessage({ type: 'refresh' });
+    });
+
+    function updateSelectedRowState() {
+      document.querySelectorAll('tr[data-row-index]').forEach(row => {
+        row.classList.toggle('selected-row', Number(row.dataset.rowIndex) === selectedRowIndex);
+      });
+      const deleteButton = document.getElementById('deleteRowBtn');
+      if (deleteButton) {
+        deleteButton.disabled = !canDelete || selectedRowIndex === null;
+      }
+    }
+
+    document.querySelectorAll('tr[data-row-index]').forEach(row => {
+      row.addEventListener('click', event => {
+        if (event.target.closest('input')) return;
+        selectedRowIndex = Number(row.dataset.rowIndex);
+        updateSelectedRowState();
+      });
+    });
+
+    const addRowButton = document.getElementById('addRowBtn');
+    const insertPanel = document.getElementById('insertPanel');
+    const insertSaveButton = document.getElementById('insertSaveBtn');
+    const insertCancelButton = document.getElementById('insertCancelBtn');
+    if (addRowButton && insertPanel) {
+      addRowButton.addEventListener('click', () => {
+        insertPanel.classList.toggle('hidden');
+        const firstInput = insertPanel.querySelector('input[data-insert-column]');
+        if (!insertPanel.classList.contains('hidden') && firstInput) {
+          firstInput.focus();
+        }
+      });
+    }
+    if (insertSaveButton && insertPanel) {
+      insertSaveButton.addEventListener('click', () => {
+        const row = {};
+        insertPanel.querySelectorAll('input[data-insert-column]').forEach(input => {
+          const value = input.value;
+          if (value !== '') {
+            row[input.dataset.insertColumn] = value.toLowerCase() === 'null' ? null : value;
+          }
+        });
+        vscode.postMessage({ type: 'insert', row });
+      });
+    }
+    if (insertCancelButton && insertPanel) {
+      insertCancelButton.addEventListener('click', () => {
+        insertPanel.querySelectorAll('input[data-insert-column]').forEach(input => input.value = '');
+        insertPanel.classList.add('hidden');
+      });
+    }
+    document.getElementById('deleteRowBtn')?.addEventListener('click', () => {
+      if (selectedRowIndex === null || !rows[selectedRowIndex]) return;
+      vscode.postMessage({ type: 'delete', row: rows[selectedRowIndex] });
     });
 
     function parseTemporalValue(raw) {

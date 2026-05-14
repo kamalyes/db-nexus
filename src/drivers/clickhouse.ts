@@ -13,7 +13,8 @@ import {
   SchemaScope,
   TableColumn,
   TableIndex,
-  TableSchema
+  TableSchema,
+  DataQueryOptions
 } from '@/core/types'
 import { DatabaseDriver } from './base'
 import { SecretService } from '@/services/secretService'
@@ -196,6 +197,38 @@ export class ClickHouseDriver implements DatabaseDriver {
     }
   }
 
+  async getTableData(
+    profile: DbConnectionProfile,
+    tableName: string,
+    scope: SchemaScope,
+    options?: DataQueryOptions
+  ): Promise<QueryResult> {
+    const start = Date.now()
+    const database = scope.database || profile.database || 'default'
+    const qualifiedTable = `${quoteClickHouseIdentifier(database)}.${quoteClickHouseIdentifier(tableName)}`
+    const whereSql = buildClickHouseWhereSql(options)
+    const orderSql = buildClickHouseOrderSql(options)
+    const limit = options?.limit || 100
+    const offset = options?.offset || 0
+
+    const result = await this.query(profile, `SELECT * FROM ${qualifiedTable}${whereSql}${orderSql} LIMIT ${limit} OFFSET ${offset}`)
+    const countResult = await this.query(profile, `SELECT count() AS total FROM ${qualifiedTable}${whereSql}`)
+    const totalRows = numberOrUndefined(countResult.data?.[0]?.total) || 0
+    const rows = result.data || []
+
+    return {
+      columns: (result.meta || []).map(column => ({
+        name: column.name,
+        type: column.type
+      })),
+      rows,
+      rowCount: rows.length,
+      elapsedMs: Date.now() - start,
+      hasMore: offset + rows.length < totalRows,
+      totalRows
+    }
+  }
+
   async getTableSchema(profile: DbConnectionProfile, tableName: string, scope: SchemaScope): Promise<TableSchema> {
     const database = scope.database || profile.database || 'default'
     const metadata: TableSchema['metadata'] = {
@@ -302,6 +335,49 @@ export class ClickHouseDriver implements DatabaseDriver {
       metadata
     }
   }
+}
+
+function buildClickHouseWhereSql(options?: DataQueryOptions): string {
+  if (!options?.filters || options.filters.length === 0) {
+    return ''
+  }
+
+  const clauses = options.filters.map(filter => {
+    const column = quoteClickHouseIdentifier(filter.column)
+    if (filter.operator === 'IS NULL' || filter.operator === 'IS NOT NULL') {
+      return `${column} ${filter.operator}`
+    }
+    if (filter.operator === 'IN' || filter.operator === 'NOT IN') {
+      const values = Array.isArray(filter.value) ? filter.value : [filter.value]
+      return `${column} ${filter.operator} (${values.map(formatClickHouseValue).join(', ')})`
+    }
+    return `${column} ${filter.operator} ${formatClickHouseValue(filter.value)}`
+  })
+  return ` WHERE ${clauses.join(' AND ')}`
+}
+
+function buildClickHouseOrderSql(options?: DataQueryOptions): string {
+  if (!options?.sorts || options.sorts.length === 0) {
+    return ''
+  }
+  return ` ORDER BY ${options.sorts.map(sort => `${quoteClickHouseIdentifier(sort.column)} ${sort.direction}`).join(', ')}`
+}
+
+function quoteClickHouseIdentifier(value: string): string {
+  return `\`${String(value).replace(/`/g, '``')}\``
+}
+
+function formatClickHouseValue(value: unknown): string {
+  if (value === null || value === undefined || value === '') {
+    return 'NULL'
+  }
+  if (typeof value === 'number' || typeof value === 'bigint') {
+    return String(value)
+  }
+  if (typeof value === 'boolean') {
+    return value ? '1' : '0'
+  }
+  return `'${escapeSqlLiteral(String(value))}'`
 }
 
 function ensureJsonFormat(sql: string): string {

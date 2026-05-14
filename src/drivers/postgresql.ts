@@ -191,6 +191,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
     const qualifiedTable = this.getQualifiedTableName(tableName, schema)
 
     let sql = `SELECT * FROM ${qualifiedTable}`
+    let whereSql = ''
     const values: unknown[] = []
 
     if (options?.filters && options.filters.length > 0) {
@@ -209,7 +210,8 @@ export class PostgreSQLDriver implements DatabaseDriver {
         }
         return `${column} ${f.operator} ${this.addQueryValue(f.value, values)}`
       })
-      sql += ` WHERE ${whereClauses.join(' AND ')}`
+      whereSql = ` WHERE ${whereClauses.join(' AND ')}`
+      sql += whereSql
     }
 
     if (options?.sorts && options.sorts.length > 0) {
@@ -228,7 +230,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
       type: field.dataTypeID.toString()
     }))
 
-    const countResult = await pool.query(`SELECT COUNT(*) as total FROM ${qualifiedTable}`)
+    const countResult = await pool.query(`SELECT COUNT(*) as total FROM ${qualifiedTable}${whereSql}`, values)
     const totalRows = Number((countResult.rows[0] as { total: string }).total)
 
     return {

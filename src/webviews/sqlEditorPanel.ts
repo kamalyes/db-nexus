@@ -19,7 +19,9 @@ interface SqlSuggestion {
   value: string
   insertText: string
   detail: string
-  kind: SchemaObject['type'] | 'keyword'
+  kind: SchemaObject['type'] | 'keyword' | 'column'
+  tableName?: string
+  schemaName?: string
 }
 
 interface SqlEditorState {
@@ -224,12 +226,19 @@ export class SqlEditorPanel {
 
     const suggestions: SqlSuggestion[] = []
     const seen = new Set<string>()
-    const addSuggestion = (value: string, kind: SqlSuggestion['kind'], detail: string, insertText = value): void => {
+    const addSuggestion = (
+      value: string,
+      kind: SqlSuggestion['kind'],
+      detail: string,
+      insertText = value,
+      tableName?: string,
+      schemaName?: string
+    ): void => {
       if (!value) return
-      const key = `${kind}:${value.toLowerCase()}:${detail.toLowerCase()}`
+      const key = `${kind}:${value.toLowerCase()}:${detail.toLowerCase()}:${tableName || ''}:${schemaName || ''}`
       if (seen.has(key)) return
       seen.add(key)
-      suggestions.push({ value, insertText, kind, detail })
+      suggestions.push({ value, insertText, kind, detail, tableName, schemaName })
     }
 
     schemas.forEach(schemaName => addSuggestion(schemaName, 'schema', 'schema'))
@@ -239,6 +248,7 @@ export class SqlEditorPanel {
       const metadataSchema = schema || this.getAutocompleteSchema(profile, schemas)
       const objects = await driver.listObjects(profile, { database, schema: metadataSchema })
 
+      const tableObjects: SchemaObject[] = []
       for (const object of objects) {
         if (object.type === 'database') continue
         const objectSchema = object.scope?.schema || metadataSchema
@@ -246,6 +256,30 @@ export class SqlEditorPanel {
           ? `${object.type} - ${objectSchema}`
           : object.type
         addSuggestion(object.name, object.type, detail)
+        if (object.type === 'table' || object.type === 'view' || object.type === 'materializedView') {
+          tableObjects.push(object)
+        }
+      }
+
+      if (driver.getTableSchema) {
+        for (const object of tableObjects.slice(0, 80)) {
+          const objectSchema = object.scope?.schema || metadataSchema
+          try {
+            const tableSchema = await driver.getTableSchema(profile, object.name, { database, schema: objectSchema })
+            for (const column of tableSchema.columns) {
+              addSuggestion(
+                column.name,
+                'column',
+                `${object.name} · ${column.type}`,
+                column.name,
+                object.name,
+                objectSchema
+              )
+            }
+          } catch {
+            // Column suggestions are best-effort; table suggestions still work.
+          }
+        }
       }
     } catch {
       return suggestions
@@ -826,7 +860,9 @@ export class SqlEditorPanel {
           value,
           insertText: String(item.insertText || value),
           detail: String(item.detail || item.kind || ''),
-          kind: String(item.kind || '')
+          kind: String(item.kind || ''),
+          tableName: String(item.tableName || ''),
+          schemaName: String(item.schemaName || '')
         });
       };
 
@@ -853,6 +889,66 @@ export class SqlEditorPanel {
         end,
         prefix: text.slice(start, position)
       };
+    }
+
+    function normalizeIdentifier(value) {
+      const tick = String.fromCharCode(96);
+      const wrapperPattern = new RegExp('^[' + tick + '"\\\\[]+|[' + tick + '"\\\\]]+$', 'g');
+      return String(value || '')
+        .trim()
+        .replace(wrapperPattern, '')
+        .split('.')
+        .pop()
+        .replace(wrapperPattern, '')
+        .toLowerCase();
+    }
+
+    function statementBeforeCursor(range) {
+      const before = editor.value.slice(0, range.start);
+      const lastSemicolon = before.lastIndexOf(';');
+      return before.slice(lastSemicolon + 1);
+    }
+
+    function referencedTables(range) {
+      const statement = statementBeforeCursor(range);
+      const tables = [];
+      const tick = String.fromCharCode(96);
+      const regex = new RegExp('\\\\b(?:from|join|update|into)\\\\s+([' + tick + '"\\\\[]?[A-Za-z0-9_$.-]+[' + tick + '"\\\\]]?)', 'gi');
+      let match;
+      while ((match = regex.exec(statement))) {
+        const table = normalizeIdentifier(match[1]);
+        if (table && !tables.includes(table)) {
+          tables.push(table);
+        }
+      }
+      return tables;
+    }
+
+    function isTableNameContext(range) {
+      const before = statementBeforeCursor(range);
+      const tick = String.fromCharCode(96);
+      const regex = new RegExp('\\\\b(from|join|update|into)\\\\s+[' + tick + '"\\\\[]?[A-Za-z0-9_$.-]*$', 'i');
+      return regex.test(before);
+    }
+
+    function suggestionPoolForContext(range) {
+      const tableContext = isTableNameContext(range);
+      const tables = referencedTables(range);
+      const keywords = allSuggestions.filter(item => item.kind === 'keyword');
+      const tableLike = allSuggestions.filter(item => item.kind === 'table' || item.kind === 'view' || item.kind === 'materializedView');
+      const scopedColumns = allSuggestions.filter(item => {
+        if (item.kind !== 'column') return false;
+        if (tables.length === 0) return true;
+        return tables.includes(normalizeIdentifier(item.tableName));
+      });
+
+      if (tableContext) {
+        return tableLike.concat(keywords);
+      }
+      if (scopedColumns.length > 0) {
+        return scopedColumns.concat(keywords, tableLike);
+      }
+      return allSuggestions;
     }
 
     function hideSuggestions() {
@@ -907,9 +1003,13 @@ export class SqlEditorPanel {
       }
 
       const lower = prefix.toLowerCase();
-      visibleSuggestions = allSuggestions
+      visibleSuggestions = suggestionPoolForContext(range)
         .filter(item => item.value.toLowerCase().includes(lower) && item.value.toLowerCase() !== lower)
         .sort((a, b) => {
+          const kindRank = { column: 0, table: 1, view: 1, materializedView: 1, keyword: 2 };
+          const aRank = kindRank[a.kind] == null ? 3 : kindRank[a.kind];
+          const bRank = kindRank[b.kind] == null ? 3 : kindRank[b.kind];
+          if (aRank !== bRank) return aRank - bRank;
           const aStarts = a.value.toLowerCase().startsWith(lower) ? 0 : 1;
           const bStarts = b.value.toLowerCase().startsWith(lower) ? 0 : 1;
           if (aStarts !== bStarts) return aStarts - bStarts;

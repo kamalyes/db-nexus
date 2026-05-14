@@ -16,7 +16,8 @@ import {
   TableForeignKey,
   TableSchema,
   MutationPlan,
-  DataEditResult
+  DataEditResult,
+  DataQueryOptions
 } from '@/core/types'
 import { SQL_CAPABILITIES } from '@/core/constants'
 import { DatabaseDriver } from './base'
@@ -169,6 +170,42 @@ export class DuckDBDriver implements DatabaseDriver {
       rows,
       rowCount: rows.length,
       elapsedMs: Date.now() - start
+    }
+  }
+
+  async getTableData(
+    profile: DbConnectionProfile,
+    tableName: string,
+    scope: SchemaScope,
+    options?: DataQueryOptions
+  ): Promise<QueryResult> {
+    const start = Date.now()
+    const conn = await this.getConnection(profile)
+    const schema = await this.getTableSchema(profile, tableName, scope)
+    const qualifiedTable = getDuckQualifiedTableName(tableName, scope)
+    const whereSql = buildDuckWhereSql(options)
+    const orderSql = buildDuckOrderSql(options)
+    const limit = options?.limit || 100
+    const offset = options?.offset || 0
+
+    const result = await conn.execute(`SELECT * FROM ${qualifiedTable}${whereSql}${orderSql} LIMIT ${limit} OFFSET ${offset}`)
+    const countResult = await conn.execute(`SELECT COUNT(*) AS total FROM ${qualifiedTable}${whereSql}`)
+    const rows = result.rows.map(row => {
+      const obj: Record<string, unknown> = {}
+      result.columns.forEach((col, index) => {
+        obj[col] = row[index]
+      })
+      return obj
+    })
+    const totalRows = Number(firstDuckValue(countResult) || 0)
+
+    return {
+      columns: schema.columns.map(column => ({ name: column.name, type: column.type })),
+      rows,
+      rowCount: rows.length,
+      elapsedMs: Date.now() - start,
+      hasMore: offset + rows.length < totalRows,
+      totalRows
     }
   }
 
@@ -419,6 +456,54 @@ function firstDuckValue(result: DuckDBResult): string | undefined {
   }
 
   return stringOrUndefined(result.rows[0][0])
+}
+
+function getDuckQualifiedTableName(tableName: string, scope: SchemaScope): string {
+  const schemaName = scope.schema || scope.database || 'main'
+  return `${quoteDuckIdentifier(schemaName)}.${quoteDuckIdentifier(tableName)}`
+}
+
+function buildDuckWhereSql(options?: DataQueryOptions): string {
+  if (!options?.filters || options.filters.length === 0) {
+    return ''
+  }
+
+  const clauses = options.filters.map(filter => {
+    const column = quoteDuckIdentifier(filter.column)
+    if (filter.operator === 'IS NULL' || filter.operator === 'IS NOT NULL') {
+      return `${column} ${filter.operator}`
+    }
+    if (filter.operator === 'IN' || filter.operator === 'NOT IN') {
+      const values = Array.isArray(filter.value) ? filter.value : [filter.value]
+      return `${column} ${filter.operator} (${values.map(formatDuckValue).join(', ')})`
+    }
+    return `${column} ${filter.operator} ${formatDuckValue(filter.value)}`
+  })
+  return ` WHERE ${clauses.join(' AND ')}`
+}
+
+function buildDuckOrderSql(options?: DataQueryOptions): string {
+  if (!options?.sorts || options.sorts.length === 0) {
+    return ''
+  }
+  return ` ORDER BY ${options.sorts.map(sort => `${quoteDuckIdentifier(sort.column)} ${sort.direction}`).join(', ')}`
+}
+
+function quoteDuckIdentifier(value: string): string {
+  return `"${String(value).replace(/"/g, '""')}"`
+}
+
+function formatDuckValue(value: unknown): string {
+  if (value === null || value === undefined || value === '') {
+    return 'NULL'
+  }
+  if (typeof value === 'number' || typeof value === 'bigint') {
+    return String(value)
+  }
+  if (typeof value === 'boolean') {
+    return value ? 'TRUE' : 'FALSE'
+  }
+  return `'${escapeSqlLiteral(String(value))}'`
 }
 
 function escapeSqlLiteral(value: string): string {
