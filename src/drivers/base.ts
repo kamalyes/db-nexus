@@ -32,6 +32,7 @@ export interface DatabaseDriver {
   planInsert?(profile: DbConnectionProfile, table: string, row: Record<string, unknown>, scope: SchemaScope): Promise<MutationPlan>
   planUpdate?(profile: DbConnectionProfile, table: string, row: Record<string, unknown>, originalRow: Record<string, unknown>, scope: SchemaScope): Promise<MutationPlan>
   planDelete?(profile: DbConnectionProfile, table: string, row: Record<string, unknown>, scope: SchemaScope): Promise<MutationPlan>
+  planBulkDelete?(profile: DbConnectionProfile, table: string, rows: Array<Record<string, unknown>>, scope: SchemaScope): Promise<MutationPlan>
   executeMutation?(profile: DbConnectionProfile, plan: MutationPlan): Promise<DataEditResult>
   getExecutionPlan?(profile: DbConnectionProfile, sql: string, scope: SchemaScope): Promise<ExecutionPlan>
   dispose?(profileId: string): Promise<void>

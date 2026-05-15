@@ -126,7 +126,7 @@ export class TableDataPanel {
             await this._handleDeleteRows(message.rows || [])
             break
           case 'commitChanges':
-            await this._handleCommitChanges(message.changes || [], message.deletes || [])
+            void this._handleCommitChanges(message.changes || [], message.deletes || [])
             break
         }
       },
@@ -278,9 +278,16 @@ export class TableDataPanel {
       if (changes.length > 0 && !this._driver.planUpdate) {
         throw new Error('Driver does not support update')
       }
-      if (deletes.length > 0 && !this._driver.planDelete) {
+      if (deletes.length > 0 && !this._driver.planBulkDelete && !this._driver.planDelete) {
         throw new Error('Driver does not support delete')
       }
+
+      this._sendMessage({
+        type: 'operationProgress',
+        message: deletes.length > 0
+          ? `Applying ${deletes.length} delete(s) in background...`
+          : `Applying ${changes.length} change(s) in background...`
+      })
 
       let affectedRows = 0
       for (const change of changes) {
@@ -298,19 +305,7 @@ export class TableDataPanel {
         affectedRows += result.affectedRows || 0
       }
 
-      for (const row of deletes) {
-        const plan = await this._driver.planDelete!(
-          this._profile,
-          this._tableName,
-          row,
-          this._scope
-        )
-        const result = await this._driver.executeMutation(this._profile, plan)
-        if (!result.success) {
-          throw new Error(result.error || 'Unknown error')
-        }
-        affectedRows += result.affectedRows || 0
-      }
+      affectedRows += await this._executeDeleteRows(deletes)
 
       this._sendMessage({ type: 'operationSuccess', message: `Committed ${affectedRows} row(s)` })
       await this._loadData()
@@ -326,36 +321,58 @@ export class TableDataPanel {
 
   private async _handleDeleteRows(rows: Record<string, unknown>[]): Promise<void> {
     try {
-      if (!this._driver.planDelete || !this._driver.executeMutation) {
-        throw new Error('Driver does not support delete')
-      }
-
       if (!Array.isArray(rows) || rows.length === 0) {
         return
       }
 
-      let affectedRows = 0
-      for (const row of rows) {
-        const plan = await this._driver.planDelete(
-          this._profile,
-          this._tableName,
-          row,
-          this._scope
-        )
-
-        const result = await this._driver.executeMutation(this._profile, plan)
-        if (!result.success) {
-          throw new Error(result.error || 'Unknown error')
-        }
-        affectedRows += result.affectedRows || 0
-      }
-
+      const affectedRows = await this._executeDeleteRows(rows)
       this._sendMessage({ type: 'operationSuccess', message: `Deleted ${affectedRows} row(s)` })
       await this._loadData()
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
       this._sendMessage({ type: 'operationError', error: message })
     }
+  }
+
+  private async _executeDeleteRows(rows: Array<Record<string, unknown>>): Promise<number> {
+    if (rows.length === 0) {
+      return 0
+    }
+
+    if (!this._driver.executeMutation || (!this._driver.planBulkDelete && !this._driver.planDelete)) {
+      throw new Error('Driver does not support delete')
+    }
+
+    if (this._driver.planBulkDelete) {
+      const plan = await this._driver.planBulkDelete(
+        this._profile,
+        this._tableName,
+        rows,
+        this._scope
+      )
+      const result = await this._driver.executeMutation(this._profile, plan)
+      if (!result.success) {
+        throw new Error(result.error || 'Unknown error')
+      }
+      return result.affectedRows || 0
+    }
+
+    let affectedRows = 0
+    for (const row of rows) {
+      const plan = await this._driver.planDelete!(
+        this._profile,
+        this._tableName,
+        row,
+        this._scope
+      )
+      const result = await this._driver.executeMutation(this._profile, plan)
+      if (!result.success) {
+        throw new Error(result.error || 'Unknown error')
+      }
+      affectedRows += result.affectedRows || 0
+    }
+
+    return affectedRows
   }
 
   private _sendMessage(message: any): void {
@@ -505,7 +522,7 @@ export class TableDataPanel {
     const primaryKeyColumns = this._schema?.columns.filter(c => c.isPrimaryKey).map(c => c.name) || []
     const canEdit = primaryKeyColumns.length > 0
     const canInsert = !!(this._driver.planInsert && this._driver.executeMutation && this._schema)
-    const canDelete = !!(canEdit && this._driver.planDelete && this._driver.executeMutation)
+    const canDelete = !!(canEdit && (this._driver.planBulkDelete || this._driver.planDelete) && this._driver.executeMutation)
     const hasBottomBar = canEdit || canInsert || canDelete
     const insertColumnDetails = this._schema?.columns || []
     const insertColumns = insertColumnDetails.map(column => column.name)
@@ -791,6 +808,10 @@ export class TableDataPanel {
     tr.row-delete-pending .select-cell {
       text-decoration: none;
     }
+    tr.row-delete-applying td {
+      opacity: .45;
+      pointer-events: none;
+    }
     .empty-cell {
       height: 96px;
       text-align: center;
@@ -1055,6 +1076,7 @@ export class TableDataPanel {
     const selectedRows = new Set();
     let pendingDeleteTargets = [];
     let contextRowIndex = null;
+    let commitInFlight = false;
 
     document.getElementById('refreshBtn').addEventListener('click', () => {
       vscode.postMessage({ type: 'refresh' });
@@ -1088,6 +1110,7 @@ export class TableDataPanel {
         const checkbox = row.querySelector('.row-select');
         if (checkbox) {
           checkbox.checked = selected;
+          checkbox.disabled = commitInFlight || pendingDeletes.has(rowIndex);
         }
       });
 
@@ -1099,12 +1122,12 @@ export class TableDataPanel {
 
       const deleteButton = document.getElementById('deleteRowBtn');
       if (deleteButton) {
-        deleteButton.disabled = !canDelete || count === 0;
+        deleteButton.disabled = commitInFlight || !canDelete || count === 0;
         deleteButton.textContent = count > 1 ? 'Delete ' + count + ' Rows' : 'Delete Selected';
       }
       const removeButton = document.getElementById('removeRowsBtn');
       if (removeButton) {
-        removeButton.disabled = !canDelete || count === 0;
+        removeButton.disabled = commitInFlight || !canDelete || count === 0;
       }
 
       const selectAll = document.getElementById('selectAllRows');
@@ -1112,11 +1135,13 @@ export class TableDataPanel {
         const selectableRows = document.querySelectorAll('tr[data-row-index]').length;
         selectAll.checked = selectableRows > 0 && count === selectableRows;
         selectAll.indeterminate = count > 0 && count < selectableRows;
+        selectAll.disabled = commitInFlight || selectableRows === 0;
       }
     }
 
     document.querySelectorAll('tr[data-row-index]').forEach(row => {
       row.addEventListener('click', event => {
+        if (commitInFlight) return;
         if (event.target.closest('input')) return;
         const rowIndex = Number(row.dataset.rowIndex);
         if (selectedRows.has(rowIndex)) {
@@ -1130,6 +1155,11 @@ export class TableDataPanel {
 
     document.querySelectorAll('.row-select').forEach(checkbox => {
       checkbox.addEventListener('change', event => {
+        if (commitInFlight) {
+          event.preventDefault();
+          updateSelectedRowState();
+          return;
+        }
         const rowIndex = Number(checkbox.dataset.rowSelect);
         if (checkbox.checked) {
           selectedRows.add(rowIndex);
@@ -1142,6 +1172,11 @@ export class TableDataPanel {
     });
 
     document.getElementById('selectAllRows')?.addEventListener('change', event => {
+      if (commitInFlight) {
+        event.preventDefault();
+        updateSelectedRowState();
+        return;
+      }
       selectedRows.clear();
       if (event.target.checked) {
         document.querySelectorAll('tr[data-row-index]').forEach(row => {
@@ -1189,6 +1224,7 @@ export class TableDataPanel {
     }
 
     function markRowsForDelete(rowIndexes) {
+      if (commitInFlight) return;
       if (!canDelete) return;
       const targets = rowIndexes
         .filter(rowIndex => rows[rowIndex] && !pendingDeletes.has(rowIndex));
@@ -1218,6 +1254,7 @@ export class TableDataPanel {
     }
 
     function requestDeleteRows(rowIndexes) {
+      if (commitInFlight) return;
       syncSelectedRowsFromCheckboxes();
       const sourceIndexes = rowIndexes.length > 0 ? rowIndexes : selectedRowIndexes();
       const targets = sourceIndexes
@@ -1237,6 +1274,7 @@ export class TableDataPanel {
 
     document.querySelectorAll('tr[data-row-index]').forEach(row => {
       row.addEventListener('contextmenu', event => {
+        if (commitInFlight) return;
         event.preventDefault();
         const rowIndex = Number(row.dataset.rowIndex);
         if (!selectedRows.has(rowIndex)) {
@@ -1425,18 +1463,47 @@ export class TableDataPanel {
       if (updateCount) parts.push(updateCount + ' edited');
       if (deleteCount) parts.push(deleteCount + ' delete pending');
       document.getElementById('pendingStatus').textContent = count ? parts.join(', ') : 'No pending changes';
-      document.getElementById('commitBtn').disabled = count === 0;
-      document.getElementById('revertBtn').disabled = count === 0;
+      document.getElementById('commitBtn').disabled = commitInFlight || count === 0;
+      document.getElementById('revertBtn').disabled = commitInFlight || count === 0;
+    }
+
+    function setCommitApplying(applying, message) {
+      commitInFlight = applying;
+      const pendingStatus = document.getElementById('pendingStatus');
+      const commitButton = document.getElementById('commitBtn');
+      const revertButton = document.getElementById('revertBtn');
+      const addButton = document.getElementById('addRowBtn');
+      const removeButton = document.getElementById('removeRowsBtn');
+
+      document.querySelectorAll('tr[data-row-index]').forEach(row => {
+        const rowIndex = Number(row.dataset.rowIndex);
+        row.classList.toggle('row-delete-applying', applying && pendingDeletes.has(rowIndex));
+      });
+
+      if (pendingStatus && applying) {
+        pendingStatus.textContent = message || 'Applying changes in background...';
+      }
+      if (commitButton) commitButton.disabled = applying || (pendingUpdates.size + pendingDeletes.size) === 0;
+      if (revertButton) revertButton.disabled = applying || (pendingUpdates.size + pendingDeletes.size) === 0;
+      if (addButton) addButton.disabled = applying;
+      if (removeButton) removeButton.disabled = applying || selectedRows.size === 0;
+
+      if (!applying) {
+        updateCommitState();
+      }
+      updateSelectedRowState();
     }
 
     function commitChanges() {
-      if (!pendingUpdates.size && !pendingDeletes.size) return;
+      if (commitInFlight || (!pendingUpdates.size && !pendingDeletes.size)) return;
       const changes = Array.from(pendingUpdates.values());
       const deletes = Array.from(pendingDeletes.values());
+      setCommitApplying(true, deletes.length > 0 ? 'Deleting in background...' : 'Applying changes in background...');
       vscode.postMessage({ type: 'commitChanges', changes, deletes });
     }
 
     function revertChanges() {
+      if (commitInFlight) return;
       pendingUpdates.clear();
       pendingDeletes.clear();
       document.querySelectorAll('tr[data-row-index]').forEach(row => {
@@ -1554,9 +1621,13 @@ export class TableDataPanel {
     window.addEventListener('message', event => {
       const message = event.data;
       if (message.type === 'operationSuccess') {
+        setCommitApplying(true, 'Applied. Refreshing...');
         showToast(message.message, 'success');
       } else if (message.type === 'operationError') {
+        setCommitApplying(false);
         showToast(message.error, 'error');
+      } else if (message.type === 'operationProgress') {
+        setCommitApplying(true, message.message);
       }
     });
 

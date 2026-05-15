@@ -20,6 +20,7 @@ import {
   DataQueryOptions
 } from '@/core/types'
 import { SQL_CAPABILITIES } from '@/core/constants'
+import { uniqueRowsByColumns } from '@/core/mutations'
 import { DatabaseDriver } from './base'
 
 interface DuckDBConnection {
@@ -396,6 +397,15 @@ export class DuckDBDriver implements DatabaseDriver {
     row: Record<string, unknown>,
     scope: SchemaScope
   ): Promise<MutationPlan> {
+    return this.planBulkDelete(profile, table, [row], scope)
+  }
+
+  async planBulkDelete(
+    profile: DbConnectionProfile,
+    table: string,
+    rows: Array<Record<string, unknown>>,
+    scope: SchemaScope
+  ): Promise<MutationPlan> {
     const qualifiedTable = getDuckQualifiedTableName(table, scope)
     const tableSchema = await this.getTableSchema(profile, table, scope)
     const primaryKeyColumns = tableSchema.columns.filter(c => c.isPrimaryKey).map(c => c.name)
@@ -404,15 +414,26 @@ export class DuckDBDriver implements DatabaseDriver {
       throw new Error('Cannot delete from table without primary key')
     }
 
-    const whereClauses = primaryKeyColumns.map(k => `${quoteDuckIdentifier(k)} = ?`).join(' AND ')
+    const deleteRows = uniqueRowsByColumns(rows, primaryKeyColumns)
+    const parameters: unknown[] = []
+    const whereClauses = primaryKeyColumns.length === 1
+      ? `${quoteDuckIdentifier(primaryKeyColumns[0])} IN (${deleteRows.map(row => {
+          parameters.push(row[primaryKeyColumns[0]])
+          return '?'
+        }).join(', ')})`
+      : deleteRows.map(row => `(${primaryKeyColumns.map(column => {
+          parameters.push(row[column])
+          return `${quoteDuckIdentifier(column)} = ?`
+        }).join(' AND ')})`).join(' OR ')
     const sql = `DELETE FROM ${qualifiedTable} WHERE ${whereClauses}`
 
     return {
       table,
       type: 'delete',
       sql,
-      parameters: primaryKeyColumns.map(column => row[column]),
-      description: `Delete row from ${table}`
+      parameters,
+      expectedAffectedRows: deleteRows.length,
+      description: `Delete ${deleteRows.length} row(s) from ${table}`
     }
   }
 
@@ -426,11 +447,12 @@ export class DuckDBDriver implements DatabaseDriver {
 
     try {
       await conn.execute(interpolatedSql)
+      const affectedRows = plan.expectedAffectedRows || 1
       return {
         success: true,
         sqlPreview: interpolatedSql,
-        affectedRows: 1,
-        message: `Row ${plan.type}ed`
+        affectedRows,
+        message: `${affectedRows} row(s) ${plan.type}ed`
       }
     } catch (error) {
       return {

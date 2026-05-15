@@ -20,6 +20,7 @@ import {
   ExecutionPlanNode
 } from '@/core/types'
 import { SQL_CAPABILITIES } from '@/core/constants'
+import { uniqueRowsByColumns } from '@/core/mutations'
 import { appendLimitIfNeeded } from '@/core/sql'
 import { DatabaseDriver } from './base'
 import { SecretService } from '@/services/secretService'
@@ -632,6 +633,15 @@ export class PostgreSQLDriver implements DatabaseDriver {
     row: Record<string, unknown>,
     scope: SchemaScope
   ): Promise<MutationPlan> {
+    return this.planBulkDelete(profile, table, [row], scope)
+  }
+
+  async planBulkDelete(
+    profile: DbConnectionProfile,
+    table: string,
+    rows: Array<Record<string, unknown>>,
+    scope: SchemaScope
+  ): Promise<MutationPlan> {
     const database = scope.database || this.getDefaultDatabase(profile)
     const schema = scope.schema
     const qualifiedTable = this.getQualifiedTableName(table, schema)
@@ -643,7 +653,17 @@ export class PostgreSQLDriver implements DatabaseDriver {
       throw new Error('Cannot delete from table without primary key')
     }
 
-    const whereClauses = primaryKeyColumns.map((k, i) => `${quotePostgresIdentifier(k)} = $${i + 1}`).join(' AND ')
+    const deleteRows = uniqueRowsByColumns(rows, primaryKeyColumns)
+    const parameters: unknown[] = []
+    const whereClauses = primaryKeyColumns.length === 1
+      ? `${quotePostgresIdentifier(primaryKeyColumns[0])} IN (${deleteRows.map(row => {
+          parameters.push(row[primaryKeyColumns[0]])
+          return `$${parameters.length}`
+        }).join(', ')})`
+      : deleteRows.map(row => `(${primaryKeyColumns.map(column => {
+          parameters.push(row[column])
+          return `${quotePostgresIdentifier(column)} = $${parameters.length}`
+        }).join(' AND ')})`).join(' OR ')
     const sql = `DELETE FROM ${qualifiedTable} WHERE ${whereClauses}`
 
     return {
@@ -652,8 +672,9 @@ export class PostgreSQLDriver implements DatabaseDriver {
       schema,
       type: 'delete',
       sql,
-      parameters: primaryKeyColumns.map(column => row[column]),
-      description: `Delete row from ${qualifiedTable}`
+      parameters,
+      expectedAffectedRows: deleteRows.length,
+      description: `Delete ${deleteRows.length} row(s) from ${qualifiedTable}`
     }
   }
 

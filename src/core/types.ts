@@ -245,6 +245,7 @@ export interface MutationPlan {
   type: 'insert' | 'update' | 'delete'
   sql: string
   parameters?: unknown[]
+  expectedAffectedRows?: number
   description: string
 }
 
