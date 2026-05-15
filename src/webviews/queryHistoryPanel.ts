@@ -53,7 +53,7 @@ export class QueryHistoryPanel {
   }
 
   private _getHtmlForWebview(): string {
-    const history = QueryHistoryService.getInstance().getRecent(100);
+    const history = QueryHistoryService.getInstance().getAll();
 
     const historyHtml = history.map(item => {
       const time = new Date(item.timestamp).toLocaleString();

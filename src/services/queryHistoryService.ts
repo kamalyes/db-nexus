@@ -15,7 +15,7 @@ export interface QueryHistoryItem {
 export class QueryHistoryService {
   private static instance: QueryHistoryService;
   private history: QueryHistoryItem[] = [];
-  private readonly maxHistorySize = 100;
+  private readonly maxHistorySize = 1000;
   private readonly storageKey = 'dbNexus.queryHistory';
   private context: any;
 

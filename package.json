@@ -332,7 +332,8 @@
       {
         "command": "dbNexus.showQueryHistory",
         "title": "%dbNexus.showQueryHistory.title%",
-        "category": "%dbNexus.category%"
+        "category": "%dbNexus.category%",
+        "icon": "$(history)"
       },
       {
         "command": "dbNexus.clearQueryHistory",
@@ -440,6 +441,11 @@
           "command": "dbNexus.refreshConnections",
           "when": "view == dbNexus.connections",
           "group": "navigation@4"
+        },
+        {
+          "command": "dbNexus.showQueryHistory",
+          "when": "view == dbNexus.connections",
+          "group": "navigation@5"
         }
       ],
       "view/item/context": [

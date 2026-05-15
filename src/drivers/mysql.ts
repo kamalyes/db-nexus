@@ -22,6 +22,7 @@ import { uniqueRowsByColumns } from '@/core/mutations'
 import { appendLimitIfNeeded, joinFilterClauses } from '@/core/sql'
 import { DatabaseDriver } from './base'
 import { SecretService } from '@/services/secretService'
+import { SqlExecutionLogService } from '@/services/sqlExecutionLogService'
 
 export class MySQLDriver implements DatabaseDriver {
   id: DatabaseDriverId = 'mysql'
@@ -58,6 +59,84 @@ export class MySQLDriver implements DatabaseDriver {
     return this.pools.get(key)!
   }
 
+  private async loggedQuery(
+    profile: DbConnectionProfile,
+    executor: { query: (sql: string, values?: unknown[]) => Promise<any> },
+    sql: string,
+    values?: unknown[]
+  ): Promise<any> {
+    const start = Date.now()
+    const loggedSql = this.formatLoggedSql(sql, values)
+
+    try {
+      const result = values ? await executor.query(sql, values) : await executor.query(sql)
+      await this.recordSql(profile, loggedSql, Date.now() - start, result)
+      return result
+    } catch (error: unknown) {
+      await this.recordSql(
+        profile,
+        loggedSql,
+        Date.now() - start,
+        error instanceof Error ? error : new Error(String(error))
+      )
+      throw error
+    }
+  }
+
+  private async recordSql(
+    profile: DbConnectionProfile,
+    sql: string,
+    elapsedMs: number,
+    resultOrError: unknown
+  ): Promise<void> {
+    try {
+      await SqlExecutionLogService.getInstance().record(
+        sql,
+        profile,
+        resultOrError instanceof Error
+          ? resultOrError
+          : {
+              columns: [],
+              rows: [],
+              rowCount: this.getLoggedRowCount(resultOrError),
+              elapsedMs
+            },
+        elapsedMs
+      )
+    } catch {
+      // The driver can be used before the extension logging service is ready.
+    }
+  }
+
+  private getLoggedRowCount(result: unknown): number {
+    if (!Array.isArray(result)) {
+      return 0
+    }
+
+    const rows = result[0] as any
+    if (Array.isArray(rows)) {
+      return rows.length
+    }
+
+    return Number(rows?.affectedRows || 0)
+  }
+
+  private formatLoggedSql(sql: string, values?: unknown[]): string {
+    if (!values || values.length === 0) {
+      return sql
+    }
+
+    try {
+      const params = JSON.stringify(
+        values,
+        (_key, value) => typeof value === 'bigint' ? value.toString() : value
+      )
+      return `${sql}\nParams: ${params}`
+    } catch {
+      return `${sql}\nParams: [unserializable]`
+    }
+  }
+
   async testConnection(profile: DbConnectionProfile): Promise<ConnectionTestResult> {
     const start = Date.now()
     let connection: Connection | undefined
@@ -73,7 +152,7 @@ export class MySQLDriver implements DatabaseDriver {
         ssl: profile.ssl ? {} : undefined,
         connectTimeout: (profile.connectTimeout ?? 30) * 1000
       })
-      await connection.query('SELECT 1')
+      await this.loggedQuery(profile, connection, 'SELECT 1')
       return {
         ok: true,
         message: 'Connection successful',
@@ -91,7 +170,7 @@ export class MySQLDriver implements DatabaseDriver {
 
   async listDatabases(profile: DbConnectionProfile): Promise<DatabaseCatalog[]> {
     const pool = await this.getPool(profile)
-    const [rows] = await pool.query('SHOW DATABASES')
+    const [rows] = await this.loggedQuery(profile, pool, 'SHOW DATABASES')
     return (rows as Array<{ Database: string }>)
       .filter(row => !['information_schema', 'mysql', 'performance_schema', 'sys'].includes(row.Database))
       .map(row => ({ name: row.Database }))
@@ -111,7 +190,9 @@ export class MySQLDriver implements DatabaseDriver {
         })
       }
     } else {
-      const [rows] = await pool.query(
+      const [rows] = await this.loggedQuery(
+        profile,
+        pool,
         `SELECT
            table_name as name,
            table_type as type,
@@ -212,8 +293,8 @@ export class MySQLDriver implements DatabaseDriver {
     const offset = options?.offset || 0
     sql += ` LIMIT ${limit} OFFSET ${offset}`
 
-    const [rows, fields] = await pool.query(sql)
-    const [countRows] = await pool.query(`SELECT COUNT(*) as total FROM ${qualifiedTable}${whereSql}`)
+    const [rows, fields] = await this.loggedQuery(profile, pool, sql)
+    const [countRows] = await this.loggedQuery(profile, pool, `SELECT COUNT(*) as total FROM ${qualifiedTable}${whereSql}`)
 
     const columns = Array.isArray(fields)
       ? fields.map(field => ({
@@ -277,7 +358,7 @@ export class MySQLDriver implements DatabaseDriver {
     const pool = await this.getPool(profile)
     const database = scope.database || profile.database
 
-    const [tableRows] = await pool.query(`
+    const [tableRows] = await this.loggedQuery(profile, pool, `
       SELECT
         ENGINE,
         TABLE_ROWS,
@@ -300,17 +381,17 @@ export class MySQLDriver implements DatabaseDriver {
       ? tableRows[0] as Record<string, unknown>
       : {}
 
-    const [versionRows] = await pool.query('SELECT VERSION() AS VERSION')
+    const [versionRows] = await this.loggedQuery(profile, pool, 'SELECT VERSION() AS VERSION')
     const serverVersion = Array.isArray(versionRows) && versionRows.length > 0
       ? String((versionRows[0] as Record<string, unknown>).VERSION || '')
       : ''
 
-    const [sessionRows] = await pool.query("SHOW STATUS LIKE 'Threads_connected'")
+    const [sessionRows] = await this.loggedQuery(profile, pool, "SHOW STATUS LIKE 'Threads_connected'")
     const activeSessions = Array.isArray(sessionRows) && sessionRows.length > 0
       ? Number((sessionRows[0] as Record<string, unknown>).Value || 0)
       : undefined
 
-    const [columnsRows] = await pool.query(`
+    const [columnsRows] = await this.loggedQuery(profile, pool, `
       SELECT 
         c.COLUMN_NAME,
         c.COLUMN_TYPE,
@@ -347,7 +428,7 @@ export class MySQLDriver implements DatabaseDriver {
       position: Number(row.ORDINAL_POSITION)
     }))
 
-    const [indexRows] = await pool.query(`
+    const [indexRows] = await this.loggedQuery(profile, pool, `
       SELECT 
         s.INDEX_NAME,
         s.COLUMN_NAME,
@@ -373,7 +454,7 @@ export class MySQLDriver implements DatabaseDriver {
       indexMap.get(name)!.columns.push(String(row.COLUMN_NAME))
     }
 
-    const [fkRows] = await pool.query(`
+    const [fkRows] = await this.loggedQuery(profile, pool, `
       SELECT 
         kcu.CONSTRAINT_NAME,
         kcu.COLUMN_NAME,
@@ -580,7 +661,7 @@ export class MySQLDriver implements DatabaseDriver {
 
     switch (objectType) {
       case 'table': {
-        const [result] = await pool.query(`SHOW CREATE TABLE \`${database}\`.\`${objectName}\``)
+        const [result] = await this.loggedQuery(profile, pool, `SHOW CREATE TABLE \`${database}\`.\`${objectName}\``)
         const rows = result as { 'Create Table': string }[]
         if (rows.length === 0) {
           throw new Error(`Table ${database}.${objectName} not found`)
@@ -589,7 +670,7 @@ export class MySQLDriver implements DatabaseDriver {
       }
       
       case 'view': {
-        const [result] = await pool.query(`SHOW CREATE VIEW \`${database}\`.\`${objectName}\``)
+        const [result] = await this.loggedQuery(profile, pool, `SHOW CREATE VIEW \`${database}\`.\`${objectName}\``)
         const rows = result as { 'Create View': string }[]
         if (rows.length === 0) {
           throw new Error(`View ${database}.${objectName} not found`)
@@ -598,7 +679,7 @@ export class MySQLDriver implements DatabaseDriver {
       }
       
       case 'index': {
-        const [result] = await pool.query(`
+        const [result] = await this.loggedQuery(profile, pool, `
           SELECT INDEX_NAME, TABLE_NAME, NON_UNIQUE, GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) AS COLUMNS
           FROM information_schema.STATISTICS
           WHERE TABLE_SCHEMA = ? AND INDEX_NAME = ?
@@ -614,7 +695,7 @@ export class MySQLDriver implements DatabaseDriver {
       }
       
       case 'procedure': {
-        const [result] = await pool.query(`SHOW CREATE PROCEDURE \`${database}\`.\`${objectName}\``)
+        const [result] = await this.loggedQuery(profile, pool, `SHOW CREATE PROCEDURE \`${database}\`.\`${objectName}\``)
         const rows = result as { 'Create Procedure': string }[]
         if (rows.length === 0) {
           throw new Error(`Procedure ${database}.${objectName} not found`)
@@ -623,7 +704,7 @@ export class MySQLDriver implements DatabaseDriver {
       }
       
       case 'function': {
-        const [result] = await pool.query(`SHOW CREATE FUNCTION \`${database}\`.\`${objectName}\``)
+        const [result] = await this.loggedQuery(profile, pool, `SHOW CREATE FUNCTION \`${database}\`.\`${objectName}\``)
         const rows = result as { 'Create Function': string }[]
         if (rows.length === 0) {
           throw new Error(`Function ${database}.${objectName} not found`)
@@ -632,7 +713,7 @@ export class MySQLDriver implements DatabaseDriver {
       }
       
       case 'trigger': {
-        const [result] = await pool.query(`SHOW CREATE TRIGGER \`${database}\`.\`${objectName}\``)
+        const [result] = await this.loggedQuery(profile, pool, `SHOW CREATE TRIGGER \`${database}\`.\`${objectName}\``)
         const rows = result as { 'SQL Original Statement': string }[]
         if (rows.length === 0) {
           throw new Error(`Trigger ${database}.${objectName} not found`)

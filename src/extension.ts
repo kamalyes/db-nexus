@@ -2,7 +2,7 @@ import { ExtensionContext, ProgressLocation, TreeItemCollapsibleState, Uri, comm
 import { buildConnectionUrl, parseConnectionUrl } from '@/core/connectionUrl'
 import { ConnectionStore } from '@/core/connectionStore'
 import { SUPPORTED_DRIVERS } from '@/core/constants'
-import { ConnectionTestResult, DatabaseDriverId, DbConnectionProfile, SchemaObject, SchemaScope, TableColumn, TableDesignDraft, TableIndex, TableSchema } from '@/core/types'
+import { ConnectionTestResult, DatabaseDriverId, DbConnectionProfile, DataEditResult, MutationPlan, SchemaObject, SchemaScope, TableColumn, TableDesignDraft, TableIndex, TableSchema } from '@/core/types'
 import { DriverRegistry } from '@/drivers/registry'
 import { getCurrentLanguage, initI18n, reloadI18n, t } from '@/i18n'
 import { ConnectionNode, ConnectionsTreeProvider, FieldNode, IndexNode, QueryFileNode, SchemaNode, TableDetailGroupNode, TablesGroupNode } from '@/providers/connectionsTree'
@@ -12,6 +12,7 @@ import { QueryService } from '@/services/queryService'
 import { QueryFileService } from '@/services/queryFileService'
 import { SecretService } from '@/services/secretService'
 import { QueryHistoryService } from '@/services/queryHistoryService'
+import { SqlExecutionLogService } from '@/services/sqlExecutionLogService'
 import { ResultPanel } from '@/webviews/resultPanel'
 import { TableSchemaPanel } from '@/webviews/tableSchemaPanel'
 import { QueryHistoryPanel } from '@/webviews/queryHistoryPanel'
@@ -86,6 +87,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
   QueryHistoryService.init(context)
 
   const outputChannel = window.createOutputChannel('DB Nexus')
+  SqlExecutionLogService.init(outputChannel)
   const connectionStore = await ConnectionStore.create(context)
   const driverRegistry = new DriverRegistry(context.extensionPath)
   const connectionService = new ConnectionService(connectionStore, driverRegistry)
@@ -251,11 +253,68 @@ export async function activate(context: ExtensionContext): Promise<void> {
   }
 
   const executeSql = async (profile: DbConnectionProfile, sql: string, scope: SchemaScope = {}) => {
-    return driverRegistry.getDriver(profile.driverId).executeQuery(profile, {
-      sql,
-      database: scope.database,
-      schema: scope.schema
-    })
+    const start = Date.now()
+    try {
+      const result = await driverRegistry.getDriver(profile.driverId).executeQuery(profile, {
+        sql,
+        database: scope.database,
+        schema: scope.schema
+      })
+      await SqlExecutionLogService.getInstance().record(sql, profile, result, Date.now() - start)
+      return result
+    } catch (error: unknown) {
+      const loggedError = error instanceof Error ? error : new Error(String(error))
+      await SqlExecutionLogService.getInstance().record(sql, profile, loggedError, Date.now() - start)
+      throw error
+    }
+  }
+
+  const formatMutationSql = (plan: MutationPlan): string => {
+    if (!plan.parameters || plan.parameters.length === 0) {
+      return plan.sql
+    }
+
+    try {
+      const params = JSON.stringify(
+        plan.parameters,
+        (_key, value) => typeof value === 'bigint' ? value.toString() : value
+      )
+      return `${plan.sql}\nParams: ${params}`
+    } catch {
+      return `${plan.sql}\nParams: [unserializable]`
+    }
+  }
+
+  const executeMutationPlan = async (
+    profile: DbConnectionProfile,
+    plan: MutationPlan
+  ): Promise<DataEditResult> => {
+    const driver = driverRegistry.getDriver(profile.driverId)
+    if (!driver.executeMutation) {
+      throw new Error('Driver does not support mutations')
+    }
+
+    const sql = formatMutationSql(plan)
+    const start = Date.now()
+
+    try {
+      const result = await driver.executeMutation(profile, plan)
+      await SqlExecutionLogService.getInstance().record(
+        sql,
+        profile,
+        result.success ? result : new Error(result.error || 'Unknown error'),
+        Date.now() - start
+      )
+      return result
+    } catch (error: unknown) {
+      await SqlExecutionLogService.getInstance().record(
+        sql,
+        profile,
+        error instanceof Error ? error : new Error(String(error)),
+        Date.now() - start
+      )
+      throw error
+    }
   }
 
   const openSqlDocument = async (sql: string, queryContext?: QueryExecutionContext): Promise<void> => {
@@ -327,14 +386,10 @@ export async function activate(context: ExtensionContext): Promise<void> {
         () => executeSql(profile, sql, scope)
       )
       ResultPanel.show(context, t('query.resultTitle', resultLabel), result)
-      await QueryHistoryService.getInstance().add(sql, profile, result)
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
       outputChannel.appendLine(message)
       window.showErrorMessage(t('query.failed', message))
-      if (sql) {
-        await QueryHistoryService.getInstance().add(sql, profile, error instanceof Error ? error : new Error(message))
-      }
     }
   }
 
@@ -486,7 +541,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
       let inserted = 0
       for (const row of rows) {
         const plan = await driver.planInsert(target.profile, target.tableName, row, target.scope)
-        const result = await driver.executeMutation(target.profile, plan)
+        const result = await executeMutationPlan(target.profile, plan)
         if (result.success) {
           inserted++
         }
@@ -1018,6 +1073,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
       const queryContext = await resolveActiveQueryContext()
       if (!queryContext) return
 
+      const start = Date.now()
       try {
         const result = await queryService.run(queryContext.profile, {
           sql,
@@ -1025,12 +1081,12 @@ export async function activate(context: ExtensionContext): Promise<void> {
           schema: queryContext.scope.schema
         })
         ResultPanel.show(context, t('query.resultTitle', getQueryContextLabel(queryContext)), result)
-        await QueryHistoryService.getInstance().add(sql, queryContext.profile, result)
+        await SqlExecutionLogService.getInstance().record(sql, queryContext.profile, result, Date.now() - start)
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error)
         outputChannel.appendLine(message)
         window.showErrorMessage(t('query.failed', message))
-        await QueryHistoryService.getInstance().add(sql, queryContext.profile, error instanceof Error ? error : new Error(message))
+        await SqlExecutionLogService.getInstance().record(sql, queryContext.profile, error instanceof Error ? error : new Error(message), Date.now() - start)
       }
     }),
     commands.registerCommand('dbNexus.showQueryHistory', async () => {
@@ -1372,12 +1428,10 @@ export async function activate(context: ExtensionContext): Promise<void> {
       try {
         const result = await executeSql(target.profile, sql, target.scope)
         ResultPanel.show(context, t('query.resultTitle', `${target.profile.name} / ${target.tableName}`), result)
-        await QueryHistoryService.getInstance().add(sql, target.profile, result)
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error)
         outputChannel.appendLine(message)
         window.showErrorMessage(t('query.failed', message))
-        await QueryHistoryService.getInstance().add(sql, target.profile, error instanceof Error ? error : new Error(message))
       }
     }),
     commands.registerCommand('dbNexus.renameColumn', async (node: FieldNode | undefined) => {
@@ -1804,9 +1858,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
       }
 
       try {
-        const result = await queryService.run(profile, { 
-          sql: `SELECT * FROM ${qualifiedName}` 
-        })
+        const result = await executeSql(profile, `SELECT * FROM ${qualifiedName}`, scope)
         await DataExportService.exportToCSV(result, tableName)
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error)
@@ -1829,9 +1881,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
       }
 
       try {
-        const result = await queryService.run(profile, { 
-          sql: `SELECT * FROM ${qualifiedName}` 
-        })
+        const result = await executeSql(profile, `SELECT * FROM ${qualifiedName}`, scope)
         await DataExportService.exportToJSON(result, tableName)
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error)
@@ -1854,9 +1904,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
       }
 
       try {
-        const result = await queryService.run(profile, { 
-          sql: `SELECT * FROM ${qualifiedName}` 
-        })
+        const result = await executeSql(profile, `SELECT * FROM ${qualifiedName}`, scope)
         await DataExportService.exportToSQL(result, tableName, `${tableName}_insert`)
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error)
@@ -1886,7 +1934,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
         let inserted = 0
         for (const row of rows) {
           const plan = await driver.planInsert(profile, tableName, row, scope)
-          const result = await driver.executeMutation(profile, plan)
+          const result = await executeMutationPlan(profile, plan)
           if (result.success) {
             inserted++
           }
@@ -1922,7 +1970,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
         let inserted = 0
         for (const row of rows) {
           const plan = await driver.planInsert(profile, tableName, row, scope)
-          const result = await driver.executeMutation(profile, plan)
+          const result = await executeMutationPlan(profile, plan)
           if (result.success) {
             inserted++
           }

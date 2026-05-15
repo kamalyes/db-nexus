@@ -1,7 +1,8 @@
 import { ExtensionContext, ViewColumn, WebviewPanel, window } from 'vscode'
-import { DbConnectionProfile, QueryResult, TableSchema, SchemaScope, DataQueryOptions } from '@/core/types'
+import { DbConnectionProfile, QueryResult, TableSchema, SchemaScope, DataQueryOptions, MutationPlan, DataEditResult } from '@/core/types'
 import { DatabaseDriver } from '@/drivers/base'
 import { t } from '@/i18n'
+import { SqlExecutionLogService } from '@/services/sqlExecutionLogService'
 
 export class TableDataPanel {
   private static currentPanel: TableDataPanel | undefined
@@ -225,7 +226,7 @@ export class TableDataPanel {
         this._scope
       )
 
-      const result = await this._driver.executeMutation(this._profile, plan)
+      const result = await this._executeMutationPlan(plan)
       if (result.success) {
         this._sendMessage({ type: 'operationSuccess', message: `Inserted ${result.affectedRows} row(s)` })
         await this._loadData()
@@ -255,7 +256,7 @@ export class TableDataPanel {
         this._scope
       )
 
-      const result = await this._driver.executeMutation(this._profile, plan)
+      const result = await this._executeMutationPlan(plan)
       if (result.success) {
         this._sendMessage({ type: 'operationSuccess', message: `Updated ${result.affectedRows} row(s)` })
         await this._loadData()
@@ -299,7 +300,7 @@ export class TableDataPanel {
           change.originalRow,
           this._scope
         )
-        const result = await this._driver.executeMutation(this._profile, plan)
+        const result = await this._executeMutationPlan(plan)
         if (!result.success) {
           throw new Error(result.error || 'Unknown error')
         }
@@ -351,7 +352,7 @@ export class TableDataPanel {
         rows,
         this._scope
       )
-      const result = await this._driver.executeMutation(this._profile, plan)
+      const result = await this._executeMutationPlan(plan)
       if (!result.success) {
         throw new Error(result.error || 'Unknown error')
       }
@@ -366,7 +367,7 @@ export class TableDataPanel {
         row,
         this._scope
       )
-      const result = await this._driver.executeMutation(this._profile, plan)
+      const result = await this._executeMutationPlan(plan)
       if (!result.success) {
         throw new Error(result.error || 'Unknown error')
       }
@@ -374,6 +375,50 @@ export class TableDataPanel {
     }
 
     return affectedRows
+  }
+
+  private async _executeMutationPlan(plan: MutationPlan): Promise<DataEditResult> {
+    if (!this._driver.executeMutation) {
+      throw new Error('Driver does not support mutations')
+    }
+
+    const sql = this._formatMutationSql(plan)
+    const start = Date.now()
+
+    try {
+      const result = await this._driver.executeMutation(this._profile, plan)
+      await SqlExecutionLogService.getInstance().record(
+        sql,
+        this._profile,
+        result.success ? result : new Error(result.error || 'Unknown error'),
+        Date.now() - start
+      )
+      return result
+    } catch (error: unknown) {
+      await SqlExecutionLogService.getInstance().record(
+        sql,
+        this._profile,
+        error instanceof Error ? error : new Error(String(error)),
+        Date.now() - start
+      )
+      throw error
+    }
+  }
+
+  private _formatMutationSql(plan: MutationPlan): string {
+    if (!plan.parameters || plan.parameters.length === 0) {
+      return plan.sql
+    }
+
+    try {
+      const params = JSON.stringify(
+        plan.parameters,
+        (_key, value) => typeof value === 'bigint' ? value.toString() : value
+      )
+      return `${plan.sql}\nParams: ${params}`
+    } catch {
+      return `${plan.sql}\nParams: [unserializable]`
+    }
   }
 
   private _sendMessage(message: any): void {

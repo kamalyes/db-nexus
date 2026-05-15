@@ -3,7 +3,7 @@ import { DbConnectionProfile, QueryResult, SchemaObject, SchemaScope } from '@/c
 import { DriverRegistry } from '@/drivers/registry'
 import { t } from '@/i18n'
 import { ConnectionService } from '@/services/connectionService'
-import { QueryHistoryService } from '@/services/queryHistoryService'
+import { SqlExecutionLogService } from '@/services/sqlExecutionLogService'
 import { QueryService } from '@/services/queryService'
 import { ExecutionPlanPanel } from './executionPlanPanel'
 
@@ -384,18 +384,19 @@ export class SqlEditorPanel {
     }
 
     this.panel.webview.postMessage({ type: 'busy', value: true })
+    const start = Date.now()
     try {
       const result = await this.queryService.run(profile, {
         sql: querySql,
         database: this.scope.database,
         schema: this.scope.schema
       })
-      await QueryHistoryService.getInstance().add(querySql, profile, result)
+      await SqlExecutionLogService.getInstance().record(querySql, profile, result, Date.now() - start)
       this.panel.webview.postMessage({ type: 'result', result: this.toWebviewResult(result) })
       this.panel.webview.postMessage({ type: 'status', message: `${result.rowCount} rows, ${result.elapsedMs} ms` })
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
-      await QueryHistoryService.getInstance().add(querySql, profile, error instanceof Error ? error : new Error(message))
+      await SqlExecutionLogService.getInstance().record(querySql, profile, error instanceof Error ? error : new Error(message), Date.now() - start)
       this.panel.webview.postMessage({ type: 'resultError', message })
       this.panel.webview.postMessage({ type: 'status', message })
     } finally {
