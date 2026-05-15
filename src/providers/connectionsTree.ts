@@ -707,11 +707,6 @@ export class ConnectionsTreeProvider implements TreeDataProvider<ConnectionTreeN
       const scope = this.getScopeForContainerNode(node)
       const objects = await this.connectionService.listObjects(node.connectionProfile, scope)
       const children = this.groupContainerChildren(node.connectionProfile, objects, scope)
-      if (children.length === 0 && node.schemaObject.type === 'database') {
-        const fallbackScope = { parentName: node.schemaObject.name }
-        const fallbackObjects = await this.connectionService.listObjects(node.connectionProfile, fallbackScope)
-        return this.groupContainerChildren(node.connectionProfile, fallbackObjects, fallbackScope)
-      }
       return children.length > 0 ? children : [new PlaceholderNode(t('connection.emptySchema'))]
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
