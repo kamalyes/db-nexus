@@ -34,7 +34,7 @@ export class CockroachDBDriver extends PostgreSQLDriver {
 
   override async listDatabases(profile: DbConnectionProfile): Promise<{ name: string; description?: string }[]> {
     const pool = await this.getPool(profile)
-    const result = await pool.query(`
+    const result = await this.loggedPoolQuery(profile, pool, `
       SELECT datname AS name
       FROM pg_database
       WHERE datistemplate = false
@@ -51,7 +51,7 @@ export class CockroachDBDriver extends PostgreSQLDriver {
     const objects: SchemaObject[] = []
 
     if (!scope.database || (scope.database && !scope.schema)) {
-      const result = await pool.query(`
+      const result = await this.loggedPoolQuery(profile, pool, `
         SELECT schema_name as name 
         FROM information_schema.schemata 
         WHERE schema_name NOT LIKE 'pg_%' 
@@ -70,7 +70,7 @@ export class CockroachDBDriver extends PostgreSQLDriver {
       }
     } else {
       try {
-        const result = await pool.query(`SHOW TABLES FROM ${quoteCockroachIdentifier(scope.schema || 'public')} WITH COMMENT`)
+        const result = await this.loggedPoolQuery(profile, pool, `SHOW TABLES FROM ${quoteCockroachIdentifier(scope.schema || 'public')} WITH COMMENT`)
         for (const row of result.rows as Array<Record<string, unknown>>) {
           const name = String(row.table_name || row.name || '')
           if (!name) {
@@ -86,7 +86,9 @@ export class CockroachDBDriver extends PostgreSQLDriver {
           })
         }
       } catch {
-        const result = await pool.query(
+        const result = await this.loggedPoolQuery(
+          profile,
+          pool,
           `SELECT table_name as name, table_type as type
            FROM information_schema.tables
            WHERE table_schema = $1
@@ -110,7 +112,7 @@ export class CockroachDBDriver extends PostgreSQLDriver {
     const tableSchema = await super.getTableSchema(profile, tableName, scope)
     const database = scope.database || this.getDefaultDatabase(profile)
     const pool = await this.getPool(profile, database)
-    const schema = scope.schema || await this.resolveCockroachTableSchema(pool, tableName)
+    const schema = scope.schema || await this.resolveCockroachTableSchema(profile, pool, tableName)
 
     tableSchema.columns = tableSchema.columns.map(column => ({
       ...column,
@@ -121,12 +123,16 @@ export class CockroachDBDriver extends PostgreSQLDriver {
       return tableSchema
     }
 
-    await this.applyCockroachComments(pool, tableSchema, tableName, schema)
+    await this.applyCockroachComments(profile, pool, tableSchema, tableName, schema)
     return tableSchema
   }
 
-  private async resolveCockroachTableSchema(pool: Pool, tableName: string): Promise<string | undefined> {
-    const result = await pool.query(`
+  private async resolveCockroachTableSchema(
+    profile: DbConnectionProfile,
+    pool: Pool,
+    tableName: string
+  ): Promise<string | undefined> {
+    const result = await this.loggedPoolQuery(profile, pool, `
       SELECT table_schema
       FROM information_schema.tables
       WHERE table_name = $1
@@ -149,13 +155,14 @@ export class CockroachDBDriver extends PostgreSQLDriver {
   }
 
   private async applyCockroachComments(
+    profile: DbConnectionProfile,
     pool: Pool,
     tableSchema: TableSchema,
     tableName: string,
     schema: string
   ): Promise<void> {
     try {
-      const tableInfo = await this.getCockroachTableInfo(pool, tableName, schema)
+      const tableInfo = await this.getCockroachTableInfo(profile, pool, tableName, schema)
       if (tableInfo.comment !== undefined) {
         tableSchema.comment = tableInfo.comment
         tableSchema.metadata = {
@@ -174,7 +181,7 @@ export class CockroachDBDriver extends PostgreSQLDriver {
     }
 
     try {
-      const columnComments = await this.getCockroachColumnComments(pool, tableName, schema)
+      const columnComments = await this.getCockroachColumnComments(profile, pool, tableName, schema)
       tableSchema.columns = tableSchema.columns.map(column => {
         if (!columnComments.has(column.name)) {
           return column
@@ -190,11 +197,12 @@ export class CockroachDBDriver extends PostgreSQLDriver {
   }
 
   private async getCockroachTableInfo(
+    profile: DbConnectionProfile,
     pool: Pool,
     tableName: string,
     schema: string
   ): Promise<{ comment?: string; rowCount?: number }> {
-    const result = await pool.query(`SHOW TABLES FROM ${quoteCockroachIdentifier(schema)} WITH COMMENT`)
+    const result = await this.loggedPoolQuery(profile, pool, `SHOW TABLES FROM ${quoteCockroachIdentifier(schema)} WITH COMMENT`)
     const row = (result.rows as Array<Record<string, unknown>>)
       .find(item => String(item.table_name || item.name || '') === tableName)
 
@@ -205,12 +213,13 @@ export class CockroachDBDriver extends PostgreSQLDriver {
   }
 
   private async getCockroachColumnComments(
+    profile: DbConnectionProfile,
     pool: Pool,
     tableName: string,
     schema: string
   ): Promise<Map<string, string>> {
     const qualifiedTable = `${quoteCockroachIdentifier(schema)}.${quoteCockroachIdentifier(tableName)}`
-    const result = await pool.query(`SHOW COLUMNS FROM ${qualifiedTable} WITH COMMENT`)
+    const result = await this.loggedPoolQuery(profile, pool, `SHOW COLUMNS FROM ${qualifiedTable} WITH COMMENT`)
     const comments = new Map<string, string>()
 
     for (const row of result.rows as Array<Record<string, unknown>>) {

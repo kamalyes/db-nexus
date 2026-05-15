@@ -19,6 +19,7 @@ import {
 } from '@/core/types'
 import { SQL_CAPABILITIES } from '@/core/constants'
 import { DatabaseDriver } from './base'
+import { SqlExecutionLogService } from '@/services/sqlExecutionLogService'
 
 export class SQLiteDriver implements DatabaseDriver {
   id: DatabaseDriverId = 'sqlite'
@@ -60,6 +61,34 @@ export class SQLiteDriver implements DatabaseDriver {
     return this.connections.get(key)!
   }
 
+  private async loggedExec(
+    profile: DbConnectionProfile,
+    db: Database,
+    sql: string
+  ): Promise<ReturnType<Database['exec']>> {
+    const start = Date.now()
+    try {
+      const result = db.exec(sql)
+      const rowCount = result.length > 0 ? result[0].values.length : 0
+      await SqlExecutionLogService.tryRecordStatement(sql, profile, Date.now() - start, rowCount)
+      return result
+    } catch (error: unknown) {
+      await SqlExecutionLogService.tryRecordError(sql, profile, error, Date.now() - start)
+      throw error
+    }
+  }
+
+  private async loggedRun(profile: DbConnectionProfile, db: Database, sql: string): Promise<void> {
+    const start = Date.now()
+    try {
+      db.run(sql)
+      await SqlExecutionLogService.tryRecordStatement(sql, profile, Date.now() - start)
+    } catch (error: unknown) {
+      await SqlExecutionLogService.tryRecordError(sql, profile, error, Date.now() - start)
+      throw error
+    }
+  }
+
   async testConnection(profile: DbConnectionProfile): Promise<ConnectionTestResult> {
     const start = Date.now()
     try {
@@ -74,11 +103,11 @@ export class SQLiteDriver implements DatabaseDriver {
       if (fs.existsSync(profile.filePath)) {
         const buffer = fs.readFileSync(profile.filePath)
         const db = new SQL.Database(buffer)
-        db.run('SELECT 1')
+        await this.loggedRun(profile, db, 'SELECT 1')
         db.close()
       } else {
         const db = new SQL.Database()
-        db.run('SELECT 1')
+        await this.loggedRun(profile, db, 'SELECT 1')
         db.close()
       }
       
@@ -104,7 +133,9 @@ export class SQLiteDriver implements DatabaseDriver {
     const objects: SchemaObject[] = []
 
     if (scope.parentName === 'main' || scope.database === 'main' || scope.schema === 'main') {
-      const result = db.exec(
+      const result = await this.loggedExec(
+        profile,
+        db,
         "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name"
       )
       
@@ -175,7 +206,7 @@ export class SQLiteDriver implements DatabaseDriver {
   async getTableSchema(profile: DbConnectionProfile, tableName: string, _scope: SchemaScope): Promise<TableSchema> {
     const db = await this.getConnection(profile)
     const quotedTable = quoteSqliteIdentifier(tableName)
-    const tableInfoRows = rowsAsObjects(db.exec(`PRAGMA table_info(${quotedTable})`))
+    const tableInfoRows = rowsAsObjects(await this.loggedExec(profile, db, `PRAGMA table_info(${quotedTable})`))
 
     const columns: TableColumn[] = tableInfoRows.map(row => ({
       name: String(row.name),
@@ -188,13 +219,13 @@ export class SQLiteDriver implements DatabaseDriver {
       position: Number(row.cid || 0) + 1
     }))
 
-    const indexRows = rowsAsObjects(db.exec(`PRAGMA index_list(${quotedTable})`))
+    const indexRows = rowsAsObjects(await this.loggedExec(profile, db, `PRAGMA index_list(${quotedTable})`))
     const indexes: TableIndex[] = []
     for (const row of indexRows) {
       const indexName = String(row.name || '')
       if (!indexName) continue
 
-      const indexInfoRows = rowsAsObjects(db.exec(`PRAGMA index_info(${quoteSqliteIdentifier(indexName)})`))
+      const indexInfoRows = rowsAsObjects(await this.loggedExec(profile, db, `PRAGMA index_info(${quoteSqliteIdentifier(indexName)})`))
       indexes.push({
         name: indexName,
         columns: indexInfoRows.map(indexInfo => String(indexInfo.name || '')).filter(Boolean),
@@ -204,7 +235,7 @@ export class SQLiteDriver implements DatabaseDriver {
       })
     }
 
-    const foreignKeyRows = rowsAsObjects(db.exec(`PRAGMA foreign_key_list(${quotedTable})`))
+    const foreignKeyRows = rowsAsObjects(await this.loggedExec(profile, db, `PRAGMA foreign_key_list(${quotedTable})`))
     const foreignKeyMap = new Map<string, TableForeignKey>()
     for (const row of foreignKeyRows) {
       const id = String(row.id || '0')
@@ -227,14 +258,14 @@ export class SQLiteDriver implements DatabaseDriver {
 
     const metadata: TableSchema['metadata'] = {
       engine: 'SQLite',
-      serverVersion: firstValue(db.exec('SELECT sqlite_version() AS version')),
-      charset: firstValue(db.exec('PRAGMA encoding')),
-      schemaVersion: numberOrUndefined(firstValue(db.exec('PRAGMA schema_version'))),
-      userVersion: numberOrUndefined(firstValue(db.exec('PRAGMA user_version'))),
-      pageCount: numberOrUndefined(firstValue(db.exec('PRAGMA page_count'))),
-      pageSize: numberOrUndefined(firstValue(db.exec('PRAGMA page_size'))),
-      freeListCount: numberOrUndefined(firstValue(db.exec('PRAGMA freelist_count'))),
-      journalMode: firstValue(db.exec('PRAGMA journal_mode'))
+      serverVersion: firstValue(await this.loggedExec(profile, db, 'SELECT sqlite_version() AS version')),
+      charset: firstValue(await this.loggedExec(profile, db, 'PRAGMA encoding')),
+      schemaVersion: numberOrUndefined(firstValue(await this.loggedExec(profile, db, 'PRAGMA schema_version'))),
+      userVersion: numberOrUndefined(firstValue(await this.loggedExec(profile, db, 'PRAGMA user_version'))),
+      pageCount: numberOrUndefined(firstValue(await this.loggedExec(profile, db, 'PRAGMA page_count'))),
+      pageSize: numberOrUndefined(firstValue(await this.loggedExec(profile, db, 'PRAGMA page_size'))),
+      freeListCount: numberOrUndefined(firstValue(await this.loggedExec(profile, db, 'PRAGMA freelist_count'))),
+      journalMode: firstValue(await this.loggedExec(profile, db, 'PRAGMA journal_mode'))
     }
 
     if (typeof metadata.pageCount === 'number' && typeof metadata.pageSize === 'number') {
@@ -246,7 +277,7 @@ export class SQLiteDriver implements DatabaseDriver {
     }
 
     try {
-      metadata.tableRows = numberOrUndefined(firstValue(db.exec(`SELECT COUNT(*) AS total FROM ${quotedTable}`)))
+      metadata.tableRows = numberOrUndefined(firstValue(await this.loggedExec(profile, db, `SELECT COUNT(*) AS total FROM ${quotedTable}`)))
     } catch {
       // Views or virtual tables may reject COUNT(*) here; keep the rest of the schema usable.
     }

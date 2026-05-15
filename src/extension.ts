@@ -270,19 +270,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
   }
 
   const formatMutationSql = (plan: MutationPlan): string => {
-    if (!plan.parameters || plan.parameters.length === 0) {
-      return plan.sql
-    }
-
-    try {
-      const params = JSON.stringify(
-        plan.parameters,
-        (_key, value) => typeof value === 'bigint' ? value.toString() : value
-      )
-      return `${plan.sql}\nParams: ${params}`
-    } catch {
-      return `${plan.sql}\nParams: [unserializable]`
-    }
+    return SqlExecutionLogService.formatSqlWithParameters(plan.sql, plan.parameters)
   }
 
   const executeMutationPlan = async (
@@ -1380,6 +1368,8 @@ export async function activate(context: ExtensionContext): Promise<void> {
 
       try {
         await executeSql(target.profile, `TRUNCATE TABLE ${getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)}`, target.scope)
+        connectionsTreeProvider?.refreshTable(target.profile, target.tableName, target.scope)
+        TableDataPanel.refreshFor(target.profile, target.tableName, target.scope)
         window.showInformationMessage(t('table.truncated', target.tableName))
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error)
@@ -1563,6 +1553,8 @@ export async function activate(context: ExtensionContext): Promise<void> {
           : 'TABLE'
         const qualifiedName = getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)
         await executeSql(target.profile, `DROP ${objectKind} ${qualifiedName}`, target.scope)
+        TableDataPanel.closeTableFor(target.profile, target.tableName, target.scope)
+        TableSchemaPanel.closeTableFor(target.profile, target.tableName, target.scope)
         connectionsTreeProvider?.refresh()
         window.showInformationMessage(t('table.deleted', target.tableName))
       } catch (error: unknown) {

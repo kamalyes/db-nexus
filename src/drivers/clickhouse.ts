@@ -18,6 +18,7 @@ import {
 } from '@/core/types'
 import { DatabaseDriver } from './base'
 import { SecretService } from '@/services/secretService'
+import { SqlExecutionLogService } from '@/services/sqlExecutionLogService'
 
 interface ClickHouseResponse {
   meta?: Array<{ name: string; type: string }>
@@ -57,7 +58,8 @@ export class ClickHouseDriver implements DatabaseDriver {
     return `${protocol}://${host}:${port}`
   }
 
-  private async query(profile: DbConnectionProfile, sql: string): Promise<ClickHouseResponse> {
+  private async query(profile: DbConnectionProfile, sql: string, shouldLog = true): Promise<ClickHouseResponse> {
+    const start = Date.now()
     const baseUrl = this.getBaseUrl(profile)
     const url = new URL(baseUrl)
     url.pathname = '/'
@@ -79,30 +81,42 @@ export class ClickHouseDriver implements DatabaseDriver {
       }
     }
 
-    return new Promise((resolve, reject) => {
-      const client = profile.ssl ? https : http
-      const req = client.request(options, (res) => {
-        let data = ''
-        res.on('data', chunk => data += chunk)
-        res.on('end', () => {
-          try {
-            const json = JSON.parse(data)
-            if (json.exception) {
-              reject(new Error(json.exception))
-            } else {
-              resolve(json)
+    try {
+      const result = await new Promise<ClickHouseResponse>((resolve, reject) => {
+        const client = profile.ssl ? https : http
+        const req = client.request(options, (res) => {
+          let data = ''
+          res.on('data', chunk => data += chunk)
+          res.on('end', () => {
+            try {
+              const json = JSON.parse(data)
+              if (json.exception) {
+                reject(new Error(json.exception))
+              } else {
+                resolve(json)
+              }
+            } catch {
+              reject(new Error(`Invalid response: ${data.substring(0, 200)}`))
             }
-          } catch {
-            reject(new Error(`Invalid response: ${data.substring(0, 200)}`))
-          }
+          })
         })
+        req.on('error', reject)
+        req.setTimeout((profile.readTimeout ?? profile.connectTimeout ?? 30) * 1000, () => {
+          req.destroy(new Error('ClickHouse request timed out'))
+        })
+        req.end()
       })
-      req.on('error', reject)
-      req.setTimeout((profile.readTimeout ?? profile.connectTimeout ?? 30) * 1000, () => {
-        req.destroy(new Error('ClickHouse request timed out'))
-      })
-      req.end()
-    })
+
+      if (shouldLog) {
+        await SqlExecutionLogService.tryRecordStatement(sql, profile, Date.now() - start, result.rows || result.data?.length || 0)
+      }
+      return result
+    } catch (error: unknown) {
+      if (shouldLog) {
+        await SqlExecutionLogService.tryRecordError(sql, profile, error, Date.now() - start)
+      }
+      throw error
+    }
   }
 
   async testConnection(profile: DbConnectionProfile): Promise<ConnectionTestResult> {
@@ -179,7 +193,7 @@ export class ClickHouseDriver implements DatabaseDriver {
 
       sql += ' FORMAT JSON'
 
-      const result = await this.query(profile, sql)
+      const result = await this.query(profile, sql, false)
 
       const columns = (result.meta || []).map(col => ({
         name: col.name,

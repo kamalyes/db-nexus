@@ -64,6 +64,26 @@ export class TableDataPanel {
     return true
   }
 
+  static closeTableFor(profile: DbConnectionProfile, tableName: string, scope: SchemaScope = {}): boolean {
+    const panel = TableDataPanel.currentPanel
+    if (!panel || !panel._matchesTable(profile, tableName, scope)) {
+      return false
+    }
+
+    panel.dispose()
+    return true
+  }
+
+  static refreshFor(profile: DbConnectionProfile, tableName: string, scope: SchemaScope = {}): boolean {
+    const panel = TableDataPanel.currentPanel
+    if (!panel || !panel._matchesTable(profile, tableName, scope)) {
+      return false
+    }
+
+    void panel._loadData()
+    return true
+  }
+
   private constructor(
     panel: WebviewPanel,
     context: ExtensionContext,
@@ -406,19 +426,7 @@ export class TableDataPanel {
   }
 
   private _formatMutationSql(plan: MutationPlan): string {
-    if (!plan.parameters || plan.parameters.length === 0) {
-      return plan.sql
-    }
-
-    try {
-      const params = JSON.stringify(
-        plan.parameters,
-        (_key, value) => typeof value === 'bigint' ? value.toString() : value
-      )
-      return `${plan.sql}\nParams: ${params}`
-    } catch {
-      return `${plan.sql}\nParams: [unserializable]`
-    }
+    return SqlExecutionLogService.formatSqlWithParameters(plan.sql, plan.parameters)
   }
 
   private _sendMessage(message: any): void {
@@ -453,6 +461,14 @@ export class TableDataPanel {
 
   private _isActive(): boolean {
     return !this._disposed && TableDataPanel.currentPanel === this
+  }
+
+  private _matchesTable(profile: DbConnectionProfile, tableName: string, scope: SchemaScope): boolean {
+    return this._profile.id === profile.id
+      && this._tableName === tableName
+      && (this._scope.database || '') === (scope.database || '')
+      && (this._scope.schema || '') === (scope.schema || '')
+      && (this._scope.parentName || '') === (scope.parentName || '')
   }
 
   private _isDisposedError(error: unknown): boolean {

@@ -8,6 +8,7 @@ type TableSchemaPanelRecord = {
   panel: WebviewPanel
   profileId?: string
   scope: SchemaScope
+  tableName: string
 }
 
 interface TableSchemaPanelContext {
@@ -45,7 +46,8 @@ export class TableSchemaPanel {
     const record: TableSchemaPanelRecord = {
       panel,
       profileId: panelContext.profile?.id,
-      scope: { ...(panelContext.scope || {}) }
+      scope: { ...(panelContext.scope || {}) },
+      tableName: schema.name
     }
     const scope = { ...(panelContext.scope || {}) }
     const objectType = panelContext.objectType || 'table'
@@ -185,6 +187,23 @@ export class TableSchemaPanel {
     let closedCount = 0
     for (const record of Array.from(this.panels)) {
       if (record.profileId !== profile.id || !isScopeWithin(record.scope, scope)) {
+        continue
+      }
+
+      record.panel.dispose()
+      closedCount++
+    }
+    return closedCount
+  }
+
+  static closeTableFor(profile: DbConnectionProfile, tableName: string, scope: SchemaScope = {}): number {
+    let closedCount = 0
+    for (const record of Array.from(this.panels)) {
+      if (
+        record.profileId !== profile.id
+        || record.tableName !== tableName
+        || !isScopeWithin(record.scope, scope)
+      ) {
         continue
       }
 

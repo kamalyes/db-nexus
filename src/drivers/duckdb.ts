@@ -22,6 +22,7 @@ import {
 import { SQL_CAPABILITIES } from '@/core/constants'
 import { uniqueRowsByColumns } from '@/core/mutations'
 import { DatabaseDriver } from './base'
+import { SqlExecutionLogService } from '@/services/sqlExecutionLogService'
 
 interface DuckDBConnection {
   close: () => Promise<void>
@@ -81,11 +82,27 @@ export class DuckDBDriver implements DatabaseDriver {
     return this.connections.get(key)!
   }
 
+  private async loggedExecute(
+    profile: DbConnectionProfile,
+    conn: DuckDBConnection,
+    sql: string
+  ): Promise<DuckDBResult> {
+    const start = Date.now()
+    try {
+      const result = await conn.execute(sql)
+      await SqlExecutionLogService.tryRecordStatement(sql, profile, Date.now() - start, result.rows.length)
+      return result
+    } catch (error: unknown) {
+      await SqlExecutionLogService.tryRecordError(sql, profile, error, Date.now() - start)
+      throw error
+    }
+  }
+
   async testConnection(profile: DbConnectionProfile): Promise<ConnectionTestResult> {
     const start = Date.now()
     try {
       const conn = await this.getConnection(profile)
-      await conn.execute('SELECT 1')
+      await this.loggedExecute(profile, conn, 'SELECT 1')
       return {
         ok: true,
         message: 'Connection successful',
@@ -101,7 +118,7 @@ export class DuckDBDriver implements DatabaseDriver {
 
   async listDatabases(profile: DbConnectionProfile): Promise<DatabaseCatalog[]> {
     const conn = await this.getConnection(profile)
-    const result = await conn.execute("SELECT database_name FROM information_schema.databases WHERE database_name NOT IN ('information_schema', 'pg_catalog')")
+    const result = await this.loggedExecute(profile, conn, "SELECT database_name FROM information_schema.databases WHERE database_name NOT IN ('information_schema', 'pg_catalog')")
     return result.rows.map((row: unknown[]) => ({
       name: String(row[0]),
       schemas: []
@@ -113,7 +130,7 @@ export class DuckDBDriver implements DatabaseDriver {
     const objects: SchemaObject[] = []
     const schemaName = scope.schema || scope.database || 'main'
 
-    const tablesResult = await conn.execute(`
+    const tablesResult = await this.loggedExecute(profile, conn, `
       SELECT
         t.table_name,
         t.table_type,
@@ -189,8 +206,8 @@ export class DuckDBDriver implements DatabaseDriver {
     const limit = options?.limit || 100
     const offset = options?.offset || 0
 
-    const result = await conn.execute(`SELECT * FROM ${qualifiedTable}${whereSql}${orderSql} LIMIT ${limit} OFFSET ${offset}`)
-    const countResult = await conn.execute(`SELECT COUNT(*) AS total FROM ${qualifiedTable}${whereSql}`)
+    const result = await this.loggedExecute(profile, conn, `SELECT * FROM ${qualifiedTable}${whereSql}${orderSql} LIMIT ${limit} OFFSET ${offset}`)
+    const countResult = await this.loggedExecute(profile, conn, `SELECT COUNT(*) AS total FROM ${qualifiedTable}${whereSql}`)
     const rows = result.rows.map(row => {
       const obj: Record<string, unknown> = {}
       result.columns.forEach((col, index) => {
@@ -218,14 +235,14 @@ export class DuckDBDriver implements DatabaseDriver {
     }
 
     try {
-      const versionResult = await conn.execute('SELECT version() AS version')
+      const versionResult = await this.loggedExecute(profile, conn, 'SELECT version() AS version')
       metadata.serverVersion = firstDuckValue(versionResult)
     } catch {
       // Optional metadata only.
     }
 
     try {
-      const tableInfoResult = await conn.execute(`
+      const tableInfoResult = await this.loggedExecute(profile, conn, `
         SELECT
           database_name,
           schema_name,
@@ -262,7 +279,7 @@ export class DuckDBDriver implements DatabaseDriver {
 
     const primaryKeyColumns = new Set<string>()
     try {
-      const constraintsResult = await conn.execute(`
+      const constraintsResult = await this.loggedExecute(profile, conn, `
         SELECT constraint_column_names
         FROM duckdb_constraints()
         WHERE table_name = '${escapeSqlLiteral(tableName)}'
@@ -278,7 +295,7 @@ export class DuckDBDriver implements DatabaseDriver {
       // Primary key metadata is best-effort across DuckDB versions.
     }
 
-    const columnsResult = await conn.execute(`
+    const columnsResult = await this.loggedExecute(profile, conn, `
       SELECT
         column_name,
         data_type,
@@ -303,7 +320,7 @@ export class DuckDBDriver implements DatabaseDriver {
       position: Number(row[4])
     }))
 
-    const indexesResult = await conn.execute(`
+    const indexesResult = await this.loggedExecute(profile, conn, `
       SELECT index_name, column_name 
       FROM duckdb_indexes() 
       WHERE table_name = '${tableName}'

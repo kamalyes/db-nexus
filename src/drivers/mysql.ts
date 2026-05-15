@@ -89,23 +89,19 @@ export class MySQLDriver implements DatabaseDriver {
     elapsedMs: number,
     resultOrError: unknown
   ): Promise<void> {
-    try {
-      await SqlExecutionLogService.getInstance().record(
-        sql,
-        profile,
-        resultOrError instanceof Error
-          ? resultOrError
-          : {
-              columns: [],
-              rows: [],
-              rowCount: this.getLoggedRowCount(resultOrError),
-              elapsedMs
-            },
-        elapsedMs
-      )
-    } catch {
-      // The driver can be used before the extension logging service is ready.
-    }
+    await SqlExecutionLogService.tryRecord(
+      sql,
+      profile,
+      resultOrError instanceof Error
+        ? resultOrError
+        : {
+            columns: [],
+            rows: [],
+            rowCount: this.getLoggedRowCount(resultOrError),
+            elapsedMs
+          },
+      elapsedMs
+    )
   }
 
   private getLoggedRowCount(result: unknown): number {
@@ -122,19 +118,7 @@ export class MySQLDriver implements DatabaseDriver {
   }
 
   private formatLoggedSql(sql: string, values?: unknown[]): string {
-    if (!values || values.length === 0) {
-      return sql
-    }
-
-    try {
-      const params = JSON.stringify(
-        values,
-        (_key, value) => typeof value === 'bigint' ? value.toString() : value
-      )
-      return `${sql}\nParams: ${params}`
-    } catch {
-      return `${sql}\nParams: [unserializable]`
-    }
+    return SqlExecutionLogService.formatSqlWithParameters(sql, values)
   }
 
   async testConnection(profile: DbConnectionProfile): Promise<ConnectionTestResult> {

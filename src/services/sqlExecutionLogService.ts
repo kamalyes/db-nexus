@@ -19,6 +19,68 @@ export class SqlExecutionLogService {
     return SqlExecutionLogService.instance
   }
 
+  static async tryRecord(
+    sql: string,
+    profile: DbConnectionProfile,
+    resultOrError: SqlExecutionResult | Error,
+    elapsedMs?: number
+  ): Promise<void> {
+    try {
+      await SqlExecutionLogService.getInstance().record(sql, profile, resultOrError, elapsedMs)
+    } catch {
+      // Some drivers can be used before the extension service is initialized.
+    }
+  }
+
+  static async tryRecordStatement(
+    sql: string,
+    profile: DbConnectionProfile,
+    elapsedMs: number,
+    rowCount = 0
+  ): Promise<void> {
+    await SqlExecutionLogService.tryRecord(
+      sql,
+      profile,
+      {
+        columns: [],
+        rows: [],
+        rowCount,
+        elapsedMs
+      },
+      elapsedMs
+    )
+  }
+
+  static async tryRecordError(
+    sql: string,
+    profile: DbConnectionProfile,
+    error: unknown,
+    elapsedMs: number
+  ): Promise<void> {
+    await SqlExecutionLogService.tryRecord(
+      sql,
+      profile,
+      error instanceof Error ? error : new Error(String(error)),
+      elapsedMs
+    )
+  }
+
+  static formatSqlWithParameters(sql: string, parameters?: unknown[]): string {
+    if (!parameters || parameters.length === 0) {
+      return sql
+    }
+
+    try {
+      const params = JSON.stringify(
+        parameters,
+        (_key, value) => typeof value === 'bigint' ? value.toString() : value
+      )
+      return `${sql}\nParams: ${params}`
+    } catch {
+      return `${sql}\nParams: [unserializable]`
+    }
+  }
+
   private constructor(private readonly outputChannel: OutputChannel) {}
 
   async record(

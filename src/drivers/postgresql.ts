@@ -24,6 +24,7 @@ import { uniqueRowsByColumns } from '@/core/mutations'
 import { appendLimitIfNeeded, joinFilterClauses } from '@/core/sql'
 import { DatabaseDriver } from './base'
 import { SecretService } from '@/services/secretService'
+import { SqlExecutionLogService } from '@/services/sqlExecutionLogService'
 
 export class PostgreSQLDriver implements DatabaseDriver {
   id: DatabaseDriverId = 'postgresql'
@@ -67,6 +68,62 @@ export class PostgreSQLDriver implements DatabaseDriver {
     return this.pools.get(key)!
   }
 
+  protected async loggedPoolQuery(
+    profile: DbConnectionProfile,
+    pool: Pool,
+    sql: string,
+    values?: unknown[]
+  ): Promise<PgQueryResult> {
+    const start = Date.now()
+    const loggedSql = SqlExecutionLogService.formatSqlWithParameters(sql, values)
+
+    try {
+      const result = values ? await pool.query(sql, values) : await pool.query(sql)
+      await SqlExecutionLogService.tryRecordStatement(loggedSql, profile, Date.now() - start, result.rowCount || result.rows.length)
+      return result
+    } catch (error: unknown) {
+      await SqlExecutionLogService.tryRecordError(loggedSql, profile, error, Date.now() - start)
+      throw error
+    }
+  }
+
+  protected async loggedClientQuery(
+    profile: DbConnectionProfile,
+    client: Client,
+    sql: string,
+    values?: unknown[]
+  ): Promise<PgQueryResult> {
+    const start = Date.now()
+    const loggedSql = SqlExecutionLogService.formatSqlWithParameters(sql, values)
+
+    try {
+      const result = values ? await client.query(sql, values) : await client.query(sql)
+      await SqlExecutionLogService.tryRecordStatement(loggedSql, profile, Date.now() - start, result.rowCount || result.rows.length)
+      return result
+    } catch (error: unknown) {
+      await SqlExecutionLogService.tryRecordError(loggedSql, profile, error, Date.now() - start)
+      throw error
+    }
+  }
+
+  protected async loggedQueryWithSchema(
+    profile: DbConnectionProfile,
+    pool: Pool,
+    schema: string | undefined,
+    sql: string
+  ): Promise<PgQueryResult> {
+    const start = Date.now()
+
+    try {
+      const result = await this.queryWithSchema(pool, schema, sql)
+      await SqlExecutionLogService.tryRecordStatement(sql, profile, Date.now() - start, result.rowCount || result.rows.length)
+      return result
+    } catch (error: unknown) {
+      await SqlExecutionLogService.tryRecordError(sql, profile, error, Date.now() - start)
+      throw error
+    }
+  }
+
   async testConnection(profile: DbConnectionProfile): Promise<ConnectionTestResult> {
     const start = Date.now()
     const password = await this.getPassword(profile)
@@ -82,7 +139,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
 
     try {
       await client.connect()
-      await client.query('SELECT 1')
+      await this.loggedClientQuery(profile, client, 'SELECT 1')
       await client.end()
       return {
         ok: true,
@@ -99,7 +156,9 @@ export class PostgreSQLDriver implements DatabaseDriver {
 
   async listDatabases(profile: DbConnectionProfile): Promise<DatabaseCatalog[]> {
     const pool = await this.getPool(profile)
-    const result = await pool.query(
+    const result = await this.loggedPoolQuery(
+      profile,
+      pool,
       "SELECT datname as name, pg_catalog.shobj_description(oid, 'pg_database') as description FROM pg_database WHERE datistemplate = false ORDER BY datname"
     )
     return result.rows.map((row: { name: string; description?: string }) => ({
@@ -114,7 +173,9 @@ export class PostgreSQLDriver implements DatabaseDriver {
     const objects: SchemaObject[] = []
 
     if (!scope.database || (scope.database && !scope.schema)) {
-      const result = await pool.query(
+      const result = await this.loggedPoolQuery(
+        profile,
+        pool,
         "SELECT schema_name as name FROM information_schema.schemata WHERE schema_name NOT LIKE 'pg_%' AND schema_name != 'information_schema' ORDER BY schema_name"
       )
       for (const row of result.rows as Array<{ name: string }>) {
@@ -125,7 +186,9 @@ export class PostgreSQLDriver implements DatabaseDriver {
         })
       }
     } else {
-      const result = await pool.query(
+      const result = await this.loggedPoolQuery(
+        profile,
+        pool,
         `SELECT
            t.table_name as name,
            t.table_type as type,
@@ -188,7 +251,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
   ): Promise<QueryResult> {
     const start = Date.now()
     const pool = await this.getPool(profile, scope.database || this.getDefaultDatabase(profile))
-    const schema = await this.resolveTableSchema(pool, tableName, scope)
+    const schema = await this.resolveTableSchema(pool, tableName, scope, profile)
     const qualifiedTable = this.getQualifiedTableName(tableName, schema)
 
     let sql = `SELECT * FROM ${qualifiedTable}`
@@ -224,14 +287,14 @@ export class PostgreSQLDriver implements DatabaseDriver {
     const offset = options?.offset || 0
     sql += ` LIMIT ${limit} OFFSET ${offset}`
 
-    const result = await pool.query(sql, values)
+    const result = await this.loggedPoolQuery(profile, pool, sql, values)
 
     const columns = result.fields.map((field: { name: string; dataTypeID: number }) => ({
       name: field.name,
       type: field.dataTypeID.toString()
     }))
 
-    const countResult = await pool.query(`SELECT COUNT(*) as total FROM ${qualifiedTable}${whereSql}`, values)
+    const countResult = await this.loggedPoolQuery(profile, pool, `SELECT COUNT(*) as total FROM ${qualifiedTable}${whereSql}`, values)
     const totalRows = Number((countResult.rows[0] as { total: string }).total)
 
     return {
@@ -251,7 +314,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
   ): Promise<ExecutionPlan> {
     const pool = await this.getPool(profile, scope.database || this.getDefaultDatabase(profile))
 
-    const result = await this.queryWithSchema(pool, scope.schema, `EXPLAIN (ANALYZE, FORMAT JSON) ${sql}`)
+    const result = await this.loggedQueryWithSchema(profile, pool, scope.schema, `EXPLAIN (ANALYZE, FORMAT JSON) ${sql}`)
     const planData = result.rows[0] as { 'QUERY PLAN': unknown[] }
 
     const parseNode = (node: Record<string, unknown>, id: string): ExecutionPlanNode => {
@@ -327,12 +390,17 @@ export class PostgreSQLDriver implements DatabaseDriver {
     return schema ? `${quotePostgresIdentifier(schema)}.${table}` : table
   }
 
-  private async resolveTableSchema(pool: Pool, tableName: string, scope: SchemaScope): Promise<string | undefined> {
+  private async resolveTableSchema(
+    pool: Pool,
+    tableName: string,
+    scope: SchemaScope,
+    profile?: DbConnectionProfile
+  ): Promise<string | undefined> {
     if (scope.schema) {
       return scope.schema
     }
 
-    const result = await pool.query(`
+    const sql = `
       SELECT table_schema
       FROM information_schema.tables
       WHERE table_name = $1
@@ -346,7 +414,11 @@ export class PostgreSQLDriver implements DatabaseDriver {
         END,
         table_schema
       LIMIT 2
-    `, [tableName])
+    `
+    const values = [tableName]
+    const result = profile
+      ? await this.loggedPoolQuery(profile, pool, sql, values)
+      : await pool.query(sql, values)
 
     if (result.rows.length === 1) {
       return String((result.rows[0] as { table_schema: string }).table_schema)
@@ -357,7 +429,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
 
   async getTableSchema(profile: DbConnectionProfile, tableName: string, scope: SchemaScope): Promise<TableSchema> {
     const pool = await this.getPool(profile, scope.database || this.getDefaultDatabase(profile))
-    const schema = await this.resolveTableSchema(pool, tableName, scope)
+    const schema = await this.resolveTableSchema(pool, tableName, scope, profile)
     const metadata: TableSchema['metadata'] = {}
 
     if (!schema) {
@@ -365,7 +437,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
     }
 
     try {
-      const tableInfoResult = await pool.query(`
+      const tableInfoResult = await this.loggedPoolQuery(profile, pool, `
         SELECT
           c.reltuples::bigint AS table_rows,
           c.relpersistence,
@@ -397,14 +469,14 @@ export class PostgreSQLDriver implements DatabaseDriver {
     }
 
     try {
-      const versionResult = await pool.query('SHOW server_version')
+      const versionResult = await this.loggedPoolQuery(profile, pool, 'SHOW server_version')
       metadata.serverVersion = stringOrUndefined(versionResult.rows[0]?.server_version)
     } catch {
       // Ignore optional server metadata failures.
     }
 
     try {
-      const databaseResult = await pool.query(`
+      const databaseResult = await this.loggedPoolQuery(profile, pool, `
         SELECT
           d.datname,
           pg_encoding_to_char(d.encoding) AS charset,
@@ -426,7 +498,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
       // Ignore optional database metadata failures.
     }
 
-    const columnsResult = await pool.query(`
+    const columnsResult = await this.loggedPoolQuery(profile, pool, `
       SELECT 
         c.column_name,
         c.data_type,
@@ -472,7 +544,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
       position: Number(row.ordinal_position)
     }))
 
-    const indexesResult = await pool.query(`
+    const indexesResult = await this.loggedPoolQuery(profile, pool, `
       SELECT 
         i.relname as index_name,
         array_agg(a.attname ORDER BY array_position(ix.indkey, a.attnum)) as columns,
@@ -500,7 +572,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
       }
     })
 
-    const fkResult = await pool.query(`
+    const fkResult = await this.loggedPoolQuery(profile, pool, `
       SELECT
         tc.constraint_name,
         kcu.column_name,
@@ -710,7 +782,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
     scope: SchemaScope
   ): Promise<string> {
     const pool = await this.getPool(profile, scope.database || this.getDefaultDatabase(profile))
-    const schema = await this.resolveTableSchema(pool, objectName, scope) || scope.schema
+    const schema = await this.resolveTableSchema(pool, objectName, scope, profile) || scope.schema
 
     if (!schema && (objectType === 'table' || objectType === 'view' || objectType === 'index')) {
       throw new Error(`${objectType} ${objectName} not found. Select a schema if it is outside the current search path.`)
@@ -718,7 +790,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
 
     switch (objectType) {
       case 'table': {
-        const result = await pool.query(`
+        const result = await this.loggedPoolQuery(profile, pool, `
           SELECT 
             'CREATE TABLE ' || quote_ident($2) || '.' || quote_ident($1) || ' (' || E'\n' ||
             array_to_string(
@@ -745,7 +817,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
         
         let ddl = (result.rows[0] as { ddl: string }).ddl
         
-        const pkResult = await pool.query(`
+        const pkResult = await this.loggedPoolQuery(profile, pool, `
           SELECT 
             tc.constraint_name,
             array_agg(kcu.column_name ORDER BY kcu.ordinal_position) as columns
@@ -768,7 +840,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
       }
       
       case 'view': {
-        const result = await pool.query(`
+        const result = await this.loggedPoolQuery(profile, pool, `
           SELECT definition
           FROM pg_views
           WHERE viewname = $1 AND schemaname = $2
@@ -783,7 +855,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
       }
       
       case 'index': {
-        const result = await pool.query(`
+        const result = await this.loggedPoolQuery(profile, pool, `
           SELECT 
             indexdef
           FROM pg_indexes
@@ -799,7 +871,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
       
       case 'function':
       case 'procedure': {
-        const result = await pool.query(`
+        const result = await this.loggedPoolQuery(profile, pool, `
           SELECT pg_get_functiondef(oid) as definition
           FROM pg_proc
           WHERE proname = $1 AND pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = $2)
@@ -813,7 +885,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
       }
       
       case 'trigger': {
-        const result = await pool.query(`
+        const result = await this.loggedPoolQuery(profile, pool, `
           SELECT pg_get_triggerdef(oid, true) as definition
           FROM pg_trigger
           WHERE tgname = $1
