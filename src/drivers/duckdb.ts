@@ -1,6 +1,6 @@
 import * as fs from 'fs'
 import * as path from 'path'
-import { appendLimitIfNeeded } from '@/core/sql'
+import { appendLimitIfNeeded, joinFilterClauses } from '@/core/sql'
 import {
   ConnectionTestResult,
   DatabaseCatalog,
@@ -515,7 +515,7 @@ function buildDuckWhereSql(options?: DataQueryOptions): string {
     }
     return `${column} ${filter.operator} ${formatDuckValue(filter.value)}`
   })
-  return ` WHERE ${clauses.join(' AND ')}`
+  return ` WHERE ${joinFilterClauses(options.filters, clauses)}`
 }
 
 function buildDuckOrderSql(options?: DataQueryOptions): string {

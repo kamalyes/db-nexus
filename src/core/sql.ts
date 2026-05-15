@@ -7,6 +7,24 @@ export function appendLimitIfNeeded(sql: string, limit?: number): string {
   return `${trimTrailingSemicolons(trimmed)} LIMIT ${limit}`
 }
 
+export function joinFilterClauses(
+  filters: Array<{ logic?: 'AND' | 'OR' }>,
+  clauses: string[]
+): string {
+  if (clauses.length === 0) {
+    return ''
+  }
+
+  return clauses.reduce((expression, clause, index) => {
+    if (index === 0) {
+      return `(${clause})`
+    }
+
+    const logic = filters[index]?.logic === 'OR' ? 'OR' : 'AND'
+    return `(${expression} ${logic} (${clause}))`
+  }, '')
+}
+
 function isLimitableQuery(sql: string): boolean {
   const keyword = getLeadingKeyword(sql)
   return keyword === 'select' || keyword === 'with'

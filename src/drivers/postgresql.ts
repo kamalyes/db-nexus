@@ -21,7 +21,7 @@ import {
 } from '@/core/types'
 import { SQL_CAPABILITIES } from '@/core/constants'
 import { uniqueRowsByColumns } from '@/core/mutations'
-import { appendLimitIfNeeded } from '@/core/sql'
+import { appendLimitIfNeeded, joinFilterClauses } from '@/core/sql'
 import { DatabaseDriver } from './base'
 import { SecretService } from '@/services/secretService'
 
@@ -211,7 +211,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
         }
         return `${column} ${f.operator} ${this.addQueryValue(f.value, values)}`
       })
-      whereSql = ` WHERE ${whereClauses.join(' AND ')}`
+      whereSql = ` WHERE ${joinFilterClauses(options.filters, whereClauses)}`
       sql += whereSql
     }
 

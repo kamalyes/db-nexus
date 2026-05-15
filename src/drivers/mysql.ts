@@ -19,7 +19,7 @@ import {
 } from '@/core/types'
 import { SQL_CAPABILITIES } from '@/core/constants'
 import { uniqueRowsByColumns } from '@/core/mutations'
-import { appendLimitIfNeeded } from '@/core/sql'
+import { appendLimitIfNeeded, joinFilterClauses } from '@/core/sql'
 import { DatabaseDriver } from './base'
 import { SecretService } from '@/services/secretService'
 
@@ -197,7 +197,7 @@ export class MySQLDriver implements DatabaseDriver {
         }
         return `${column} ${filter.operator} ${this.formatValue(filter.value)}`
       })
-      whereSql = ` WHERE ${whereClauses.join(' AND ')}`
+      whereSql = ` WHERE ${joinFilterClauses(options.filters, whereClauses)}`
       sql += whereSql
     }
 

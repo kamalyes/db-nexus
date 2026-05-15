@@ -17,7 +17,7 @@ export class TableDataPanel {
   private _totalRows: number = 0
   private _totalRowsKnown: boolean = true
   private _hasMoreRows: boolean = false
-  private _filters: { column: string; operator: string; value: string }[] = []
+  private _filters: { logic?: 'AND' | 'OR'; column: string; operator: string; value: string }[] = []
   private _sorts: { column: string; direction: 'ASC' | 'DESC' }[] = []
   private _disposed = false
 
@@ -156,6 +156,7 @@ export class TableDataPanel {
         limit: this._pageSize,
         offset: (this._currentPage - 1) * this._pageSize,
         filters: this._filters.map(f => ({
+          logic: f.logic === 'OR' ? 'OR' : 'AND',
           column: f.column,
           operator: f.operator as any,
           value: f.value
@@ -519,6 +520,7 @@ export class TableDataPanel {
       : rows.length > 0
         ? `${(offset + 1).toLocaleString()}-${(offset + rows.length).toLocaleString()} rows${this._hasMoreRows ? '+' : ''}`
         : '0 rows'
+    const elapsedText = this._formatElapsedMs(result.elapsedMs)
     const primaryKeyColumns = this._schema?.columns.filter(c => c.isPrimaryKey).map(c => c.name) || []
     const canEdit = primaryKeyColumns.length > 0
     const canInsert = !!(this._driver.planInsert && this._driver.executeMutation && this._schema)
@@ -532,24 +534,13 @@ export class TableDataPanel {
     const selectedFilterColumn = activeFilter?.column || ''
     const selectedFilterOperator = activeFilter?.operator || '='
     const selectedFilterValue = activeFilter?.value || ''
+    const selectedFilterLogic = activeFilter?.logic === 'OR' ? 'OR' : 'AND'
     const filterColumnOptions = columns
       .map(column => `<option value="${this._escapeAttr(column)}" ${column === selectedFilterColumn ? 'selected' : ''}>${this._escapeHtml(column)}</option>`)
       .join('')
     const filterOperatorOptions = filterOperators
       .map(operator => `<option value="${this._escapeAttr(operator)}" ${operator === selectedFilterOperator ? 'selected' : ''}>${this._escapeHtml(operator)}</option>`)
       .join('')
-    const activeFiltersHtml = this._filters.length > 0
-      ? `<div class="active-filters">${this._filters.map((filter, index) => {
-          const needsValue = filter.operator !== 'IS NULL' && filter.operator !== 'IS NOT NULL'
-          const valueText = needsValue ? ` ${String(filter.value ?? '')}` : ''
-          return `
-            <button class="filter-chip" type="button" data-remove-filter="${index}" title="Remove filter">
-              <span>${this._escapeHtml(`${filter.column} ${filter.operator}${valueText}`)}</span>
-              <span class="filter-chip-remove">x</span>
-            </button>
-          `
-        }).join('')}</div>`
-      : ''
 
     const colgroup = [
       '<col class="select-col" style="width: 42px">',
@@ -1031,12 +1022,16 @@ export class TableDataPanel {
   <div class="toolbar">
     <button id="refreshBtn" class="secondary" title="F5">${this._escapeHtml(t('common.refresh'))}</button>
     <span class="page-info" id="selectionStatus">0 selected</span>
-    <div class="stats">${this._escapeHtml(statsText)} / ${this._escapeHtml(pageInfo)}</div>
+    <div class="stats">${this._escapeHtml(statsText)} / ${this._escapeHtml(pageInfo)} / ${this._escapeHtml(elapsedText)}</div>
   </div>
 
   ${insertPanel}
 
   <div class="filter-bar">
+    <select id="filterLogic" title="Condition connector">
+      <option value="AND" ${selectedFilterLogic === 'AND' ? 'selected' : ''}>AND</option>
+      <option value="OR" ${selectedFilterLogic === 'OR' ? 'selected' : ''}>OR</option>
+    </select>
     <select id="filterColumn">
       <option value="">Select column...</option>
       ${filterColumnOptions}
@@ -1046,8 +1041,9 @@ export class TableDataPanel {
     </select>
     <input id="filterValue" type="text" placeholder="Filter value..." value="${this._escapeAttr(selectedFilterValue)}">
     <button id="applyFilterBtn" class="secondary" title="Add filter condition">+ Add Condition</button>
+    <button id="runFilterBtn" class="secondary" title="Apply filter conditions">Apply Filters</button>
     <button id="clearFilterBtn" class="secondary">Clear</button>
-    ${activeFiltersHtml}
+    <div class="active-filters" id="activeFilters"></div>
   </div>
 
   <div class="table-container">
@@ -1626,12 +1622,22 @@ export class TableDataPanel {
     });
 
     const appliedFilters = ${this._escapeScriptJson(JSON.stringify(this._filters))};
+    let pendingFilters = appliedFilters.slice();
+    const filterLogicInput = document.getElementById('filterLogic');
     const filterColumnInput = document.getElementById('filterColumn');
     const filterOperatorInput = document.getElementById('filterOperator');
     const filterValueInput = document.getElementById('filterValue');
+    const addFilterButton = document.getElementById('applyFilterBtn');
+    const runFilterButton = document.getElementById('runFilterBtn');
+    const clearFilterButton = document.getElementById('clearFilterBtn');
+    const activeFilters = document.getElementById('activeFilters');
 
     function filterNeedsValue(operator) {
       return operator !== 'IS NULL' && operator !== 'IS NOT NULL';
+    }
+
+    function filterLogic(logic) {
+      return logic === 'OR' ? 'OR' : 'AND';
     }
 
     function syncFilterValueState() {
@@ -1642,17 +1648,58 @@ export class TableDataPanel {
       }
     }
 
+    function syncFilterControls() {
+      filterLogicInput.disabled = pendingFilters.length === 0;
+      runFilterButton.disabled = sameFilterList(pendingFilters, appliedFilters);
+      clearFilterButton.disabled = pendingFilters.length === 0 && appliedFilters.length === 0;
+    }
+
     function sameFilter(left, right) {
       return left.column === right.column
         && left.operator === right.operator
+        && filterLogic(left.logic) === filterLogic(right.logic)
         && String(left.value ?? '') === String(right.value ?? '');
     }
 
-    function postFilters(filters) {
-      vscode.postMessage({ type: 'filter', filters });
+    function sameFilterList(left, right) {
+      if (left.length !== right.length) {
+        return false;
+      }
+      return left.every((filter, index) => sameFilter(filter, right[index]));
     }
 
-    function applyFilter() {
+    function filterLabel(filter, index) {
+      const prefix = index === 0 ? '' : filterLogic(filter.logic) + ' ';
+      const needsValue = filterNeedsValue(filter.operator);
+      const valueText = needsValue ? ' ' + String(filter.value ?? '') : '';
+      return prefix + filter.column + ' ' + filter.operator + valueText;
+    }
+
+    function renderFilters() {
+      activeFilters.replaceChildren();
+      pendingFilters.forEach((filter, index) => {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'filter-chip';
+        chip.title = 'Remove condition';
+
+        const text = document.createElement('span');
+        text.textContent = filterLabel(filter, index);
+        const remove = document.createElement('span');
+        remove.className = 'filter-chip-remove';
+        remove.textContent = 'x';
+
+        chip.append(text, remove);
+        chip.addEventListener('click', () => {
+          pendingFilters = pendingFilters.filter((_, filterIndex) => filterIndex !== index);
+          renderFilters();
+        });
+        activeFilters.appendChild(chip);
+      });
+      syncFilterControls();
+    }
+
+    function addFilterCondition() {
       const column = filterColumnInput.value;
       const operator = filterOperatorInput.value;
       const value = filterNeedsValue(operator) ? filterValueInput.value : '';
@@ -1660,33 +1707,40 @@ export class TableDataPanel {
         return;
       }
 
-      const nextFilter = { column, operator, value };
-      const nextFilters = appliedFilters.slice();
-      if (!nextFilters.some(filter => sameFilter(filter, nextFilter))) {
-        nextFilters.push(nextFilter);
+      const nextFilter = {
+        logic: pendingFilters.length === 0 ? 'AND' : filterLogic(filterLogicInput.value),
+        column,
+        operator,
+        value
+      };
+      if (!pendingFilters.some(filter => sameFilter(filter, nextFilter))) {
+        pendingFilters = pendingFilters.concat(nextFilter);
       }
-      postFilters(nextFilters);
+      renderFilters();
     }
-    document.getElementById('applyFilterBtn').addEventListener('click', applyFilter);
+
+    function applyFilters() {
+      vscode.postMessage({ type: 'filter', filters: pendingFilters });
+    }
+
+    addFilterButton.addEventListener('click', addFilterCondition);
+    runFilterButton.addEventListener('click', applyFilters);
     filterOperatorInput.addEventListener('change', syncFilterValueState);
     filterValueInput.addEventListener('keydown', event => {
       if (event.key === 'Enter' && !event.isComposing) {
         event.preventDefault();
-        applyFilter();
+        addFilterCondition();
       }
     });
-    document.querySelectorAll('[data-remove-filter]').forEach(button => {
-      button.addEventListener('click', () => {
-        const index = Number(button.dataset.removeFilter);
-        postFilters(appliedFilters.filter((_, filterIndex) => filterIndex !== index));
-      });
-    });
-    document.getElementById('clearFilterBtn').addEventListener('click', () => {
+    clearFilterButton.addEventListener('click', () => {
+      pendingFilters = [];
       filterColumnInput.value = '';
       filterValueInput.value = '';
-      postFilters([]);
+      renderFilters();
+      applyFilters();
     });
     syncFilterValueState();
+    renderFilters();
 
     document.getElementById('firstPage').addEventListener('click', () => vscode.postMessage({ type: 'pageChange', page: 1 }));
     document.getElementById('prevPage').addEventListener('click', () => vscode.postMessage({ type: 'pageChange', page: ${this._currentPage - 1} }));
@@ -2841,6 +2895,18 @@ export class TableDataPanel {
       .replace(/&/g, '\\u0026')
       .replace(/\u2028/g, '\\u2028')
       .replace(/\u2029/g, '\\u2029')
+  }
+
+  private _formatElapsedMs(elapsedMs: number): string {
+    if (!Number.isFinite(elapsedMs) || elapsedMs < 0) {
+      return 'Time --'
+    }
+
+    if (elapsedMs < 1000) {
+      return `Time ${Math.round(elapsedMs)} ms`
+    }
+
+    return `Time ${(elapsedMs / 1000).toFixed(2)} s`
   }
 
   private dispose(panelAlreadyDisposed = false): void {

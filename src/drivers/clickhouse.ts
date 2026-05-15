@@ -1,6 +1,6 @@
 import https from 'https'
 import http from 'http'
-import { appendLimitIfNeeded } from '@/core/sql'
+import { appendLimitIfNeeded, joinFilterClauses } from '@/core/sql'
 import {
   ConnectionTestResult,
   DatabaseCatalog,
@@ -353,7 +353,7 @@ function buildClickHouseWhereSql(options?: DataQueryOptions): string {
     }
     return `${column} ${filter.operator} ${formatClickHouseValue(filter.value)}`
   })
-  return ` WHERE ${clauses.join(' AND ')}`
+  return ` WHERE ${joinFilterClauses(options.filters, clauses)}`
 }
 
 function buildClickHouseOrderSql(options?: DataQueryOptions): string {

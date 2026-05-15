@@ -112,6 +112,7 @@ export interface SchemaObject {
 }
 
 export interface DataFilter {
+  logic?: 'AND' | 'OR'
   column: string
   operator: '=' | '!=' | '>' | '<' | '>=' | '<=' | 'LIKE' | 'NOT LIKE' | 'IS NULL' | 'IS NOT NULL' | 'IN' | 'NOT IN'
   value?: unknown
