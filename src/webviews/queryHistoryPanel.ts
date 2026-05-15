@@ -1,4 +1,4 @@
-import { ExtensionContext, ViewColumn, window, WebviewPanel } from 'vscode';
+import { ExtensionContext, ViewColumn, WebviewPanel, window } from 'vscode';
 import { QueryHistoryService, QueryHistoryItem } from '@/services/queryHistoryService';
 import { t } from '@/i18n';
 
@@ -11,6 +11,7 @@ export class QueryHistoryPanel {
   static show(context: ExtensionContext): void {
     const column = ViewColumn.Beside;
     if (QueryHistoryPanel.currentPanel) {
+      QueryHistoryPanel.currentPanel._update();
       QueryHistoryPanel.currentPanel._panel.reveal(column);
       return;
     }
@@ -34,6 +35,9 @@ export class QueryHistoryPanel {
 
     this._update();
 
+    this._disposables.push(
+      QueryHistoryService.getInstance().onDidChange(() => this._update())
+    );
     this._panel.onDidDispose(() => this.dispose(), null, this._disposables);
   }
 
@@ -55,10 +59,10 @@ export class QueryHistoryPanel {
   private _getHtmlForWebview(): string {
     const history = QueryHistoryService.getInstance().getAll();
 
-    const historyHtml = history.map(item => {
+    const historyHtml = history.map((item: QueryHistoryItem) => {
       const time = new Date(item.timestamp).toLocaleString();
       const statusClass = item.success ? 'success' : 'error';
-      const statusIcon = item.success ? '✅' : '❌';
+      const statusIcon = item.success ? '&#10003;' : '&#10005;';
       const duration = item.durationMs ? `${item.durationMs}ms` : '';
       const rowCount = item.rowCount !== undefined ? `${item.rowCount} rows` : '';
 

@@ -1,3 +1,4 @@
+import { EventEmitter } from 'vscode';
 import { DbConnectionProfile, QueryRequest, QueryResult } from '@/core/types';
 
 export interface QueryHistoryItem {
@@ -17,6 +18,8 @@ export class QueryHistoryService {
   private history: QueryHistoryItem[] = [];
   private readonly maxHistorySize = 1000;
   private readonly storageKey = 'dbNexus.queryHistory';
+  private readonly _onDidChange = new EventEmitter<void>();
+  readonly onDidChange = this._onDidChange.event;
   private context: any;
 
   static init(context: any): void {
@@ -76,6 +79,7 @@ export class QueryHistoryService {
       this.history = this.history.slice(0, this.maxHistorySize);
     }
     await this.saveToStorage();
+    this._onDidChange.fire();
   }
 
   getAll(): QueryHistoryItem[] {
@@ -89,5 +93,6 @@ export class QueryHistoryService {
   async clear(): Promise<void> {
     this.history = [];
     await this.saveToStorage();
+    this._onDidChange.fire();
   }
 }
