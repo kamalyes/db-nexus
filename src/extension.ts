@@ -773,8 +773,9 @@ export async function activate(context: ExtensionContext): Promise<void> {
     )
   }
 
-  const addConnectionFromUrl = async (connectionUrl?: string): Promise<void> => {
-    const rawUrl = connectionUrl || await window.showInputBox({
+  const addConnectionFromUrl = async (connectionUrl?: unknown): Promise<void> => {
+    const initialUrl = typeof connectionUrl === 'string' ? connectionUrl : undefined
+    const rawUrl = initialUrl || await window.showInputBox({
       prompt: t('connection.urlPrompt'),
       placeHolder: 'postgresql://user:password@localhost:5432/app?ssl=true',
       ignoreFocusOut: true
@@ -947,7 +948,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
     commands.registerCommand('dbNexus.keepTreeContainerExpanded', async (node: SchemaNode | TablesGroupNode | undefined) => {
       await keepTreeContainerExpanded(node)
     }),
-    commands.registerCommand('dbNexus.addConnectionFromUrl', async (connectionUrl?: string) => {
+    commands.registerCommand('dbNexus.addConnectionFromUrl', async (connectionUrl?: unknown) => {
       await addConnectionFromUrl(connectionUrl)
     }),
     commands.registerCommand('dbNexus.copyConnectionUrl', async (target?: ConnectionNode | DbConnectionProfile | string) => {
