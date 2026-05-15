@@ -527,6 +527,29 @@ export class TableDataPanel {
     const insertColumnDetails = this._schema?.columns || []
     const insertColumns = insertColumnDetails.map(column => column.name)
     const defaultColumnWidth = 180
+    const activeFilter = this._filters[this._filters.length - 1]
+    const filterOperators = ['=', '!=', '>', '<', '>=', '<=', 'LIKE', 'NOT LIKE', 'IS NULL', 'IS NOT NULL']
+    const selectedFilterColumn = activeFilter?.column || ''
+    const selectedFilterOperator = activeFilter?.operator || '='
+    const selectedFilterValue = activeFilter?.value || ''
+    const filterColumnOptions = columns
+      .map(column => `<option value="${this._escapeAttr(column)}" ${column === selectedFilterColumn ? 'selected' : ''}>${this._escapeHtml(column)}</option>`)
+      .join('')
+    const filterOperatorOptions = filterOperators
+      .map(operator => `<option value="${this._escapeAttr(operator)}" ${operator === selectedFilterOperator ? 'selected' : ''}>${this._escapeHtml(operator)}</option>`)
+      .join('')
+    const activeFiltersHtml = this._filters.length > 0
+      ? `<div class="active-filters">${this._filters.map((filter, index) => {
+          const needsValue = filter.operator !== 'IS NULL' && filter.operator !== 'IS NOT NULL'
+          const valueText = needsValue ? ` ${String(filter.value ?? '')}` : ''
+          return `
+            <button class="filter-chip" type="button" data-remove-filter="${index}" title="Remove filter">
+              <span>${this._escapeHtml(`${filter.column} ${filter.operator}${valueText}`)}</span>
+              <span class="filter-chip-remove">x</span>
+            </button>
+          `
+        }).join('')}</div>`
+      : ''
 
     const colgroup = [
       '<col class="select-col" style="width: 42px">',
@@ -621,6 +644,34 @@ export class TableDataPanel {
     }
     .filter-bar {
       margin-bottom: 10px;
+    }
+    .active-filters {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+      width: 100%;
+      min-height: 24px;
+    }
+    .filter-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      max-width: min(420px, 100%);
+      padding: 3px 8px;
+      border: 1px solid var(--vscode-widget-border);
+      border-radius: 4px;
+      color: var(--vscode-foreground);
+      background: var(--vscode-badge-background);
+    }
+    .filter-chip span:first-child {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .filter-chip-remove {
+      color: var(--vscode-descriptionForeground);
+      font-weight: 700;
     }
     .insert-panel {
       margin-bottom: 10px;
@@ -988,22 +1039,15 @@ export class TableDataPanel {
   <div class="filter-bar">
     <select id="filterColumn">
       <option value="">Select column...</option>
-      ${columns.map(column => `<option value="${this._escapeAttr(column)}">${this._escapeHtml(column)}</option>`).join('')}
+      ${filterColumnOptions}
     </select>
     <select id="filterOperator">
-      <option value="=">=</option>
-      <option value="!=">!=</option>
-      <option value=">">&gt;</option>
-      <option value="<">&lt;</option>
-      <option value=">=">&gt;=</option>
-      <option value="<=">&lt;=</option>
-      <option value="LIKE">LIKE</option>
-      <option value="IS NULL">IS NULL</option>
-      <option value="IS NOT NULL">IS NOT NULL</option>
+      ${filterOperatorOptions}
     </select>
-    <input id="filterValue" type="text" placeholder="Filter value...">
-    <button id="applyFilterBtn" class="secondary">Apply Filter</button>
+    <input id="filterValue" type="text" placeholder="Filter value..." value="${this._escapeAttr(selectedFilterValue)}">
+    <button id="applyFilterBtn" class="secondary" title="Add filter condition">+ Add Condition</button>
     <button id="clearFilterBtn" class="secondary">Clear</button>
+    ${activeFiltersHtml}
   </div>
 
   <div class="table-container">
@@ -1581,19 +1625,68 @@ export class TableDataPanel {
       });
     });
 
-    document.getElementById('applyFilterBtn').addEventListener('click', () => {
-      const column = document.getElementById('filterColumn').value;
-      const operator = document.getElementById('filterOperator').value;
-      const value = document.getElementById('filterValue').value;
-      if (column && operator) {
-        vscode.postMessage({ type: 'filter', filters: [{ column, operator, value }] });
+    const appliedFilters = ${this._escapeScriptJson(JSON.stringify(this._filters))};
+    const filterColumnInput = document.getElementById('filterColumn');
+    const filterOperatorInput = document.getElementById('filterOperator');
+    const filterValueInput = document.getElementById('filterValue');
+
+    function filterNeedsValue(operator) {
+      return operator !== 'IS NULL' && operator !== 'IS NOT NULL';
+    }
+
+    function syncFilterValueState() {
+      const needsValue = filterNeedsValue(filterOperatorInput.value);
+      filterValueInput.disabled = !needsValue;
+      if (!needsValue) {
+        filterValueInput.value = '';
+      }
+    }
+
+    function sameFilter(left, right) {
+      return left.column === right.column
+        && left.operator === right.operator
+        && String(left.value ?? '') === String(right.value ?? '');
+    }
+
+    function postFilters(filters) {
+      vscode.postMessage({ type: 'filter', filters });
+    }
+
+    function applyFilter() {
+      const column = filterColumnInput.value;
+      const operator = filterOperatorInput.value;
+      const value = filterNeedsValue(operator) ? filterValueInput.value : '';
+      if (!column || !operator) {
+        return;
+      }
+
+      const nextFilter = { column, operator, value };
+      const nextFilters = appliedFilters.slice();
+      if (!nextFilters.some(filter => sameFilter(filter, nextFilter))) {
+        nextFilters.push(nextFilter);
+      }
+      postFilters(nextFilters);
+    }
+    document.getElementById('applyFilterBtn').addEventListener('click', applyFilter);
+    filterOperatorInput.addEventListener('change', syncFilterValueState);
+    filterValueInput.addEventListener('keydown', event => {
+      if (event.key === 'Enter' && !event.isComposing) {
+        event.preventDefault();
+        applyFilter();
       }
     });
-    document.getElementById('clearFilterBtn').addEventListener('click', () => {
-      document.getElementById('filterColumn').value = '';
-      document.getElementById('filterValue').value = '';
-      vscode.postMessage({ type: 'filter', filters: [] });
+    document.querySelectorAll('[data-remove-filter]').forEach(button => {
+      button.addEventListener('click', () => {
+        const index = Number(button.dataset.removeFilter);
+        postFilters(appliedFilters.filter((_, filterIndex) => filterIndex !== index));
+      });
     });
+    document.getElementById('clearFilterBtn').addEventListener('click', () => {
+      filterColumnInput.value = '';
+      filterValueInput.value = '';
+      postFilters([]);
+    });
+    syncFilterValueState();
 
     document.getElementById('firstPage').addEventListener('click', () => vscode.postMessage({ type: 'pageChange', page: 1 }));
     document.getElementById('prevPage').addEventListener('click', () => vscode.postMessage({ type: 'pageChange', page: ${this._currentPage - 1} }));
