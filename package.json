@@ -336,6 +336,12 @@
         "icon": "$(history)"
       },
       {
+        "command": "dbNexus.showConnectionMonitor",
+        "title": "%dbNexus.showConnectionMonitor.title%",
+        "category": "%dbNexus.category%",
+        "icon": "$(pulse)"
+      },
+      {
         "command": "dbNexus.clearQueryHistory",
         "title": "%dbNexus.clearQueryHistory.title%",
         "category": "%dbNexus.category%"
@@ -446,6 +452,11 @@
           "command": "dbNexus.showQueryHistory",
           "when": "view == dbNexus.connections",
           "group": "navigation@5"
+        },
+        {
+          "command": "dbNexus.showConnectionMonitor",
+          "when": "view == dbNexus.connections",
+          "group": "navigation@6"
         }
       ],
       "view/item/context": [
@@ -923,6 +934,7 @@
     "duckdb": "^1.1.0",
     "mysql2": "^3.9.0",
     "pg": "^8.11.0",
+    "sql-formatter": "^15.8.0",
     "sql.js": "^1.10.0"
   },
   "devDependencies": {

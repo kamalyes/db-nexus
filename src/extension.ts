@@ -26,6 +26,7 @@ import { SchemaComparePanel } from '@/webviews/schemaComparePanel'
 import { DataMigrationService, MigrationOptions } from '@/services/dataMigrationService'
 import { ConnectionDashboard } from '@/webviews/connectionDashboard'
 import { SqlEditorPanel } from '@/webviews/sqlEditorPanel'
+import { ConnectionMonitorPanel } from '@/webviews/connectionMonitorPanel'
 
 let connectionsTreeProvider: ConnectionsTreeProvider | undefined
 let connectionsTreeView: ReturnType<typeof window.createTreeView> | undefined
@@ -1079,6 +1080,9 @@ export async function activate(context: ExtensionContext): Promise<void> {
     }),
     commands.registerCommand('dbNexus.showQueryHistory', async () => {
       QueryHistoryPanel.show(context)
+    }),
+    commands.registerCommand('dbNexus.showConnectionMonitor', async () => {
+      ConnectionMonitorPanel.show(context, connectionStore, driverRegistry)
     }),
     commands.registerCommand('dbNexus.clearQueryHistory', async () => {
       const confirm = await window.showWarningMessage(

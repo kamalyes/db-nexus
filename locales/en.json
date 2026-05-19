@@ -292,6 +292,9 @@
     "clearConfirm": "Are you sure you want to clear the query history?",
     "cleared": "Query history cleared"
   },
+  "monitor": {
+    "title": "Connection Monitor"
+  },
   "dataEdit": {
     "title": "Edit SQL",
     "preview": "SQL Preview",

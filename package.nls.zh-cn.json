@@ -56,6 +56,7 @@
   "dbNexus.createGroup.title": "新建组",
   "dbNexus.pasteIntoDatabase.title": "粘贴",
   "dbNexus.showQueryHistory.title": "显示查询历史",
+  "dbNexus.showConnectionMonitor.title": "显示连接监控",
   "dbNexus.clearQueryHistory.title": "清空查询历史",
   "dbNexus.showExecutionPlan.title": "显示执行计划",
   "dbNexus.showDDL.title": "显示 DDL",

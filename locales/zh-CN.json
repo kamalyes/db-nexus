@@ -292,6 +292,9 @@
     "clearConfirm": "确定要清空查询历史吗？",
     "cleared": "查询历史已清空"
   },
+  "monitor": {
+    "title": "连接监控"
+  },
   "dataEdit": {
     "title": "编辑 SQL",
     "preview": "SQL 预览",

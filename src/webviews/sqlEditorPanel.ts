@@ -1,11 +1,12 @@
 import { ExtensionContext, Uri, ViewColumn, WebviewPanel, window, workspace } from 'vscode'
-import { DbConnectionProfile, QueryResult, SchemaObject, SchemaScope } from '@/core/types'
+import { DbConnectionProfile, DatabaseDriverId, QueryResult, SchemaObject, SchemaScope } from '@/core/types'
 import { DriverRegistry } from '@/drivers/registry'
 import { t } from '@/i18n'
 import { ConnectionService } from '@/services/connectionService'
 import { SqlExecutionLogService } from '@/services/sqlExecutionLogService'
 import { QueryService } from '@/services/queryService'
 import { ExecutionPlanPanel } from './executionPlanPanel'
+import { format as sqlFormat } from 'sql-formatter'
 
 interface SqlEditorOptions {
   sql?: string
@@ -146,6 +147,18 @@ export class SqlEditorPanel {
 
     if (message.type === 'askAi') {
       window.showInformationMessage('AI assistant is not configured yet.')
+    }
+
+    if (message.type === 'format' && typeof message.sql === 'string') {
+      try {
+        const dialect = this.mapDriverToFormatterDialect(this.selectedProfile?.driverId)
+        const formatted = sqlFormat(message.sql, { language: dialect, tabWidth: 2, keywordCase: 'upper' })
+        this.panel.webview.postMessage({ type: 'formatted', sql: formatted })
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error)
+        this.panel.webview.postMessage({ type: 'status', message: `Format failed: ${msg}` })
+      }
+      return
     }
 
     if (message.type === 'refreshMetadata') {
@@ -484,6 +497,25 @@ export class SqlEditorPanel {
 
   private getFileName(uri: Uri): string {
     return uri.path.split('/').pop() || 'query.sql'
+  }
+
+  private mapDriverToFormatterDialect(driverId?: DatabaseDriverId): 'sql' | 'postgresql' | 'mysql' | 'mariadb' | 'sqlite' | 'duckdb' | 'clickhouse' {
+    switch (driverId) {
+      case 'postgresql':
+      case 'cockroachdb':
+        return 'postgresql'
+      case 'mysql':
+      case 'mariadb':
+        return 'mysql'
+      case 'sqlite':
+        return 'sqlite'
+      case 'duckdb':
+        return 'duckdb'
+      case 'clickhouse':
+        return 'clickhouse'
+      default:
+        return 'sql'
+    }
   }
 
   private render(): string {
@@ -1237,12 +1269,7 @@ export class SqlEditorPanel {
     }
 
     function formatSql(sql) {
-      return sql
-        .replace(/\\s+/g, ' ')
-        .replace(/\\b(from|where|group by|order by|having|limit|offset|values|set)\\b/gi, '\\n$1')
-        .replace(/\\b(inner join|left join|right join|full join|join)\\b/gi, '\\n$1')
-        .replace(/\\b(and|or)\\b/gi, '\\n  $1')
-        .trim();
+      vscode.postMessage({ type: 'format', sql });
     }
 
     function currentTableName() {
@@ -1379,6 +1406,13 @@ export class SqlEditorPanel {
       if (message.type === 'resultError') {
         renderResultError(message.message);
       }
+      if (message.type === 'formatted' && typeof message.sql === 'string') {
+        editor.value = message.sql;
+        updateGutter();
+        updateCursorStatus();
+        updateSuggestions();
+        status.textContent = 'SQL formatted';
+      }
     });
 
     editor.addEventListener('input', () => { updateGutter(); updateCursorStatus(); updateSuggestions(); });
@@ -1430,10 +1464,7 @@ export class SqlEditorPanel {
       }
       if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'f') {
         event.preventDefault();
-        editor.value = formatSql(editor.value);
-        updateGutter();
-        updateCursorStatus();
-        updateSuggestions();
+        formatSql(editor.value);
       }
       if ((event.ctrlKey || event.metaKey) && event.key === '/') {
         event.preventDefault();
@@ -1466,10 +1497,7 @@ export class SqlEditorPanel {
       });
     });
     formatButton.addEventListener('click', () => {
-      editor.value = formatSql(editor.value);
-      updateGutter();
-      updateCursorStatus();
-      updateSuggestions();
+      formatSql(editor.value);
     });
     commentButton.addEventListener('click', toggleComment);
     clearButton.addEventListener('click', () => {

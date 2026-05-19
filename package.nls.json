@@ -56,6 +56,7 @@
   "dbNexus.createGroup.title": "New Group",
   "dbNexus.pasteIntoDatabase.title": "Paste",
   "dbNexus.showQueryHistory.title": "Show Query History",
+  "dbNexus.showConnectionMonitor.title": "Show Connection Monitor",
   "dbNexus.clearQueryHistory.title": "Clear Query History",
   "dbNexus.showExecutionPlan.title": "Show Execution Plan",
   "dbNexus.showDDL.title": "Show DDL",
