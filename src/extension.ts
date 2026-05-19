@@ -2582,7 +2582,7 @@ function mockSqlValue(
     return sqlString(JSON.stringify({ mock: true, row: sequence }))
   }
 
-  if (isNumericType(type) || name === 'id' || name.endsWith('_id')) {
+  if (isNumericType(type) && !isUuidType(type, name) && !isStringType(type)) {
     return mockNumericValue(type, name, sequence, groupNumber, hint, unique)
   }
 
@@ -2631,6 +2631,9 @@ function mockTextValue(
   hint: ColumnIndexHint,
   unique: boolean
 ): string {
+  if (name === 'id' || name.endsWith('_id')) {
+    return unique || hint.primary ? `id_${String(sequence).padStart(8, '0')}` : `id_${String(groupNumber).padStart(8, '0')}`
+  }
   if (name.includes('email')) {
     return `user${sequence}@example.com`
   }
@@ -2685,6 +2688,10 @@ function getMockBaseNumber(schema: TableSchema): number {
 
 function isNumericType(type: string): boolean {
   return /(int|serial|number|numeric|decimal|float|double|real)/.test(type)
+}
+
+function isStringType(type: string): boolean {
+  return /(char|varchar|text|clob|string)/.test(type)
 }
 
 function isBooleanType(type: string): boolean {
@@ -3182,6 +3189,20 @@ function buildDropPrimaryKeySql(driverId: DatabaseDriverId, qualifiedName: strin
     const primaryIndex = originalSchema.indexes.find(index => index.isPrimary)
     const constraintName = primaryIndex?.name || `${originalSchema.name}_pkey`
     return [`ALTER TABLE ${qualifiedName} DROP CONSTRAINT ${quoteSqlIdentifier(driverId, constraintName)};`]
+  }
+  if (driverId === 'sqlite') {
+    // SQLite does not support ALTER TABLE DROP PRIMARY KEY directly.
+    // The primary key constraint must be handled during table recreation.
+    // For now, return empty and warn the user.
+    throw new Error(t('table.primaryKeyAlterNotSupported', 'SQLite'))
+  }
+  if (driverId === 'duckdb') {
+    const primaryIndex = originalSchema.indexes.find(index => index.isPrimary)
+    const constraintName = primaryIndex?.name || `${originalSchema.name}_pkey`
+    return [`ALTER TABLE ${qualifiedName} DROP CONSTRAINT ${quoteSqlIdentifier(driverId, constraintName)};`]
+  }
+  if (driverId === 'clickhouse') {
+    return [`ALTER TABLE ${qualifiedName} DROP PRIMARY KEY;`]
   }
 
   throw new Error(t('table.primaryKeyAlterNotSupported', driverId))

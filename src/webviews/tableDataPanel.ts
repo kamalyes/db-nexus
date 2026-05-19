@@ -555,6 +555,7 @@ export class TableDataPanel {
     window.addEventListener('keydown', event => {
       if (event.key === 'F5') {
         event.preventDefault();
+        event.stopPropagation();
         refresh();
       }
     });
@@ -636,7 +637,7 @@ export class TableDataPanel {
         </td>
         ${columns.map((column, columnIndex) => {
           const value = row[column]
-          const raw = value === null || value === undefined ? '' : String(value)
+          const raw = value === null || value === undefined ? '' : (typeof value === 'object' ? JSON.stringify(value) : String(value))
           const displayValue = value === null || value === undefined
             ? '<span class="null-value">NULL</span>'
             : this._escapeHtml(raw)
@@ -1081,7 +1082,7 @@ export class TableDataPanel {
 </head>
 <body>
   <div class="toolbar">
-    <button id="refreshBtn" class="secondary" title="F5">${this._escapeHtml(t('common.refresh'))}</button>
+    <button id="refreshBtn" class="secondary" title="Refresh (F5)">${this._escapeHtml(t('common.refresh'))}</button>
     <span class="page-info" id="selectionStatus">0 selected</span>
     <div class="stats">${this._escapeHtml(statsText)} / ${this._escapeHtml(pageInfo)} / ${this._escapeHtml(elapsedText)}</div>
   </div>
@@ -1185,6 +1186,7 @@ export class TableDataPanel {
     window.addEventListener('keydown', event => {
       if (event.key === 'F5') {
         event.preventDefault();
+        event.stopPropagation();
         vscode.postMessage({ type: 'refresh' });
       }
     });
@@ -1469,6 +1471,8 @@ export class TableDataPanel {
         span.className = 'null-value';
         span.textContent = value === '' ? '' : 'NULL';
         cell.appendChild(span);
+      } else if (typeof value === 'object') {
+        cell.textContent = JSON.stringify(value);
       } else {
         cell.textContent = String(value);
       }
@@ -1510,7 +1514,7 @@ export class TableDataPanel {
       const column = cell.dataset.column;
       const pending = pendingUpdates.get(rowIndex);
       const sourceRow = pending ? pending.row : rows[rowIndex];
-      const currentValue = sourceRow[column] === null || sourceRow[column] === undefined ? '' : String(sourceRow[column]);
+      const currentValue = sourceRow[column] === null || sourceRow[column] === undefined ? '' : (typeof sourceRow[column] === 'object' ? JSON.stringify(sourceRow[column]) : String(sourceRow[column]));
 
       cell.textContent = '';
       const input = document.createElement('input');
@@ -1552,6 +1556,55 @@ export class TableDataPanel {
       cell.addEventListener('mouseenter', () => {
         const parsed = parseTemporalValue(cell.dataset.raw || cell.textContent || '');
         if (parsed) cell.title = parsed;
+      });
+    });
+
+    // Batch paste support: paste clipboard content into a column
+    document.addEventListener('paste', event => {
+      if (!canEdit || commitInFlight) return;
+      const activeElement = document.activeElement;
+      if (activeElement && activeElement.tagName === 'INPUT' && activeElement.classList.contains('cell-editor')) return;
+
+      const text = event.clipboardData?.getData('text/plain');
+      if (!text) return;
+
+      const lines = text.replace(/\\r\\n/g, '\\n').replace(/\\r/g, '\\n').split('\\n').filter(line => line.length > 0);
+      if (lines.length === 0) return;
+
+      // Determine target column from focused cell or last clicked cell
+      const focusedCell = document.querySelector('.data-cell:focus, .data-cell.last-focused');
+      if (!focusedCell) return;
+
+      const targetColumn = focusedCell.dataset.column;
+      if (!targetColumn) return;
+
+      event.preventDefault();
+
+      let startRowIndex = Number(focusedCell.dataset.rowIndex);
+      const totalRows = rows.length;
+      let appliedCount = 0;
+
+      for (let i = 0; i < lines.length && startRowIndex + i < totalRows; i++) {
+        const rowIndex = startRowIndex + i;
+        if (pendingDeletes.has(rowIndex)) continue;
+        const cell = document.querySelector('td.data-cell[data-row-index="' + rowIndex + '"][data-column="' + targetColumn + '"]');
+        if (!cell) continue;
+        setPendingCell(rowIndex, targetColumn, lines[i], cell);
+        renderCellValue(cell, lines[i]);
+        appliedCount++;
+      }
+
+      if (appliedCount > 0) {
+        showToast('Pasted ' + appliedCount + ' value(s) into ' + targetColumn, 'success');
+      }
+    });
+
+    // Track last focused cell for paste target
+    document.querySelectorAll('.data-cell').forEach(cell => {
+      cell.setAttribute('tabindex', '0');
+      cell.addEventListener('focus', () => {
+        document.querySelectorAll('.data-cell.last-focused').forEach(c => c.classList.remove('last-focused'));
+        cell.classList.add('last-focused');
       });
     });
 
@@ -2193,11 +2246,12 @@ export class TableDataPanel {
           ` : ''}
           ${columns.map(c => {
             const value = row[c]
-            const displayValue = value === null || value === undefined 
-              ? '<span class="null-value">NULL</span>' 
-              : this._escapeHtml(String(value))
+            const serialized = value === null || value === undefined ? '' : (typeof value === 'object' ? JSON.stringify(value) : String(value))
+            const displayValue = value === null || value === undefined
+              ? '<span class="null-value">NULL</span>'
+              : this._escapeHtml(serialized)
             const isPk = primaryKeyColumns.includes(c)
-            return `<td class="editable" data-column="${c}" data-original="${this._escapeHtml(String(value ?? ''))}">${displayValue}</td>`
+            return `<td class="editable" data-column="${c}" data-original="${this._escapeHtml(serialized)}">${displayValue}</td>`
           }).join('')}
         </tr>
         `).join('')}
@@ -2276,7 +2330,7 @@ export class TableDataPanel {
         const value = originalRowData[column];
         const input = document.createElement('input');
         input.type = 'text';
-        input.value = value === null || value === undefined ? '' : String(value);
+        input.value = value === null || value === undefined ? '' : (typeof value === 'object' ? JSON.stringify(value) : String(value));
         input.dataset.column = column;
         if (primaryKeyColumns.includes(column)) {
           input.readOnly = true;
@@ -2309,7 +2363,7 @@ export class TableDataPanel {
       cells.forEach(cell => {
         const column = cell.dataset.column;
         const value = originalRowData[column];
-        cell.textContent = value === null || value === undefined ? '' : String(value);
+        cell.textContent = value === null || value === undefined ? '' : (typeof value === 'object' ? JSON.stringify(value) : String(value));
       });
 
       const actionsCell = tr.querySelector('td .row-actions');
@@ -2437,7 +2491,7 @@ export class TableDataPanel {
         ${canEdit ? '<td class="row-marker"></td>' : ''}
         ${columns.map((column, columnIndex) => {
           const value = row[column]
-          const rawValue = value === null || value === undefined ? '' : String(value)
+          const rawValue = value === null || value === undefined ? '' : (typeof value === 'object' ? JSON.stringify(value) : String(value))
           const displayValue = value === null || value === undefined
             ? '<span class="cell-value null-value">NULL</span>'
             : `<span class="cell-value">${this._escapeHtml(rawValue)}</span>`
@@ -2720,7 +2774,8 @@ export class TableDataPanel {
     });
 
     function cellDisplay(value) {
-      return value === null || value === undefined ? 'NULL' : String(value);
+      if (value === null || value === undefined) return 'NULL';
+      return typeof value === 'object' ? JSON.stringify(value) : String(value);
     }
 
     function renderCell(cell, value) {
@@ -2732,7 +2787,7 @@ export class TableDataPanel {
         span.classList.add('null-value');
       }
       span.textContent = cellDisplay(value);
-      cell.dataset.raw = value === null || value === undefined ? '' : String(value);
+      cell.dataset.raw = value === null || value === undefined ? '' : (typeof value === 'object' ? JSON.stringify(value) : String(value));
     }
 
     function beginCellEdit(cell) {
@@ -2741,7 +2796,7 @@ export class TableDataPanel {
       const column = cell.dataset.column;
       const current = pendingUpdates.get(rowIndex)?.row[column] ?? rows[rowIndex][column];
       const input = document.createElement('input');
-      input.value = current === null || current === undefined ? '' : String(current);
+      input.value = current === null || current === undefined ? '' : (typeof current === 'object' ? JSON.stringify(current) : String(current));
       cell.classList.add('cell-editing');
       cell.textContent = '';
       cell.appendChild(input);
