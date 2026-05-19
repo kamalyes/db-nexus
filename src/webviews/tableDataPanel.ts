@@ -1,4 +1,4 @@
-import { ExtensionContext, ViewColumn, WebviewPanel, window } from 'vscode'
+import { ExtensionContext, ViewColumn, WebviewPanel, env, window } from 'vscode'
 import { DbConnectionProfile, QueryResult, TableSchema, SchemaScope, DataQueryOptions, MutationPlan, DataEditResult } from '@/core/types'
 import { DatabaseDriver } from '@/drivers/base'
 import { t } from '@/i18n'
@@ -148,6 +148,14 @@ export class TableDataPanel {
             break
           case 'commitChanges':
             void this._handleCommitChanges(message.changes || [], message.deletes || [])
+            break
+          case 'readClipboard':
+            try {
+              const text = await env.clipboard.readText()
+              this._panel.webview.postMessage({ type: 'clipboardContent', text, targetColumn: message.targetColumn, startRowIndex: message.startRowIndex })
+            } catch {
+              this._panel.webview.postMessage({ type: 'clipboardContent', text: '', targetColumn: message.targetColumn, startRowIndex: message.startRowIndex })
+            }
             break
         }
       },
@@ -925,6 +933,12 @@ export class TableDataPanel {
     }
     .data-cell {
       cursor: cell;
+      outline: 2px solid transparent;
+      outline-offset: -2px;
+    }
+    .data-cell:focus, .data-cell.last-focused {
+      outline: 2px solid var(--vscode-focusBorder);
+      outline-offset: -2px;
     }
     .data-cell.dirty {
       background: var(--vscode-editor-inactiveSelectionBackground);
@@ -1552,26 +1566,32 @@ export class TableDataPanel {
     }
 
     document.querySelectorAll('.data-cell').forEach(cell => {
+      cell.setAttribute('tabindex', '0');
       cell.addEventListener('dblclick', () => startCellEdit(cell));
+      cell.addEventListener('click', event => {
+        // Focus the cell for paste operations
+        cell.focus();
+        // If not clicking with Ctrl/Meta, don't toggle row selection
+        // so the cell can receive focus and paste events
+        if (!event.ctrlKey && !event.metaKey) {
+          event.stopPropagation();
+        }
+      });
       cell.addEventListener('mouseenter', () => {
         const parsed = parseTemporalValue(cell.dataset.raw || cell.textContent || '');
         if (parsed) cell.title = parsed;
       });
     });
 
-    // Batch paste support: paste clipboard content into a column
-    document.addEventListener('paste', event => {
+    // Batch paste support: Ctrl+V reads clipboard via extension host
+    // (VSCode webview intercepts paste events, so we use keyboard event + host API)
+    document.addEventListener('keydown', event => {
       if (!canEdit || commitInFlight) return;
+      if (!((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'v')) return;
+
       const activeElement = document.activeElement;
       if (activeElement && activeElement.tagName === 'INPUT' && activeElement.classList.contains('cell-editor')) return;
 
-      const text = event.clipboardData?.getData('text/plain');
-      if (!text) return;
-
-      const lines = text.replace(/\\r\\n/g, '\\n').replace(/\\r/g, '\\n').split('\\n').filter(line => line.length > 0);
-      if (lines.length === 0) return;
-
-      // Determine target column from focused cell or last clicked cell
       const focusedCell = document.querySelector('.data-cell:focus, .data-cell.last-focused');
       if (!focusedCell) return;
 
@@ -1579,29 +1599,46 @@ export class TableDataPanel {
       if (!targetColumn) return;
 
       event.preventDefault();
+      event.stopPropagation();
 
-      let startRowIndex = Number(focusedCell.dataset.rowIndex);
-      const totalRows = rows.length;
-      let appliedCount = 0;
+      const startRowIndex = Number(focusedCell.dataset.rowIndex);
+      vscode.postMessage({
+        type: 'readClipboard',
+        targetColumn,
+        startRowIndex
+      });
+    });
 
-      for (let i = 0; i < lines.length && startRowIndex + i < totalRows; i++) {
-        const rowIndex = startRowIndex + i;
-        if (pendingDeletes.has(rowIndex)) continue;
-        const cell = document.querySelector('td.data-cell[data-row-index="' + rowIndex + '"][data-column="' + targetColumn + '"]');
-        if (!cell) continue;
-        setPendingCell(rowIndex, targetColumn, lines[i], cell);
-        renderCellValue(cell, lines[i]);
-        appliedCount++;
-      }
+    // Handle clipboard content returned from extension host
+    window.addEventListener('message', event => {
+      const message = event.data;
+      if (message.type === 'clipboardContent' && message.text) {
+        const lines = message.text.replace(/\\r\\n/g, '\\n').replace(/\\r/g, '\\n').split('\\n').filter(line => line.length > 0);
+        if (lines.length === 0) return;
 
-      if (appliedCount > 0) {
-        showToast('Pasted ' + appliedCount + ' value(s) into ' + targetColumn, 'success');
+        const targetColumn = message.targetColumn;
+        const startRowIndex = Number(message.startRowIndex);
+        const totalRows = rows.length;
+        let appliedCount = 0;
+
+        for (let i = 0; i < lines.length && startRowIndex + i < totalRows; i++) {
+          const rowIndex = startRowIndex + i;
+          if (pendingDeletes.has(rowIndex)) continue;
+          const cell = document.querySelector('td.data-cell[data-row-index="' + rowIndex + '"][data-column="' + targetColumn + '"]');
+          if (!cell) continue;
+          setPendingCell(rowIndex, targetColumn, lines[i], cell);
+          renderCellValue(cell, lines[i]);
+          appliedCount++;
+        }
+
+        if (appliedCount > 0) {
+          showToast('Pasted ' + appliedCount + ' value(s) into ' + targetColumn, 'success');
+        }
       }
     });
 
     // Track last focused cell for paste target
     document.querySelectorAll('.data-cell').forEach(cell => {
-      cell.setAttribute('tabindex', '0');
       cell.addEventListener('focus', () => {
         document.querySelectorAll('.data-cell.last-focused').forEach(c => c.classList.remove('last-focused'));
         cell.classList.add('last-focused');
