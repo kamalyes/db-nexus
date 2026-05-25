@@ -121,14 +121,15 @@ export async function activate(context: ExtensionContext): Promise<void> {
     workspace.getConfiguration('workbench.list').get<string>('openMode') === 'doubleClick'
   )
 
-  context.subscriptions.push(workspace.onDidCloseTextDocument(document => {
+  context.subscriptions.push(workspace.onDidCloseTextDocument((document: { uri: Uri }) => {
     documentQueryContexts.delete(document.uri.toString())
   }))
 
   connectionsTreeProvider = new ConnectionsTreeProvider(connectionService, context.extensionPath, queryFileService)
   connectionsTreeView = window.createTreeView('dbNexus.connections', {
     treeDataProvider: connectionsTreeProvider,
-    showCollapseAll: true
+    showCollapseAll: true,
+    canSelectMany: true
   })
 
   const resolveNodeContext = async (
@@ -232,6 +233,30 @@ export async function activate(context: ExtensionContext): Promise<void> {
       return selected
     }
     return undefined
+  }
+
+  // getSelectedTableNodes 获取多选的表节点（支持 Shift/Ctrl 多选）
+  const getSelectedTableNodes = (node: SchemaNode | undefined, selectedNodes?: SchemaNode[]): SchemaNode[] => {
+    if (selectedNodes && selectedNodes.length > 0) {
+      return selectedNodes.filter(n => n instanceof SchemaNode && isTableLikeNode(n))
+    }
+    if (node && isTableLikeNode(node)) {
+      return [node]
+    }
+    return []
+  }
+
+  // resolveTableTargetFromSchemaNode 从 SchemaNode 直接解析 TableTarget（同步版本，用于批量操作）
+  const resolveTableTargetFromSchemaNode = (node: SchemaNode): TableTarget | undefined => {
+    if (!isTableLikeNode(node)) return undefined
+    return {
+      profile: node.connectionProfile,
+      scope: node.scope || {},
+      tableName: node.schemaObject.name,
+      objectType: node.schemaObject.type,
+      rowCount: node.schemaObject.rowCount,
+      description: node.schemaObject.description
+    }
   }
 
   const resolveFieldTarget = async (node: FieldNode | FieldTarget | undefined): Promise<FieldTarget | undefined> => {
@@ -1354,30 +1379,42 @@ export async function activate(context: ExtensionContext): Promise<void> {
         window.showErrorMessage(t('table.renameFailed', message))
       }
     }),
-    commands.registerCommand('dbNexus.truncateTable', async (node: SchemaNode | undefined) => {
-      const target = await resolveTableTarget(node)
-      if (!target) return
+    commands.registerCommand('dbNexus.truncateTable', async (node: SchemaNode | undefined, selectedNodes?: SchemaNode[]) => {
+      const nodes = getSelectedTableNodes(node, selectedNodes)
+      if (nodes.length === 0) return
 
-      if (target.objectType !== 'table') {
+      const targets = nodes.map(n => resolveTableTargetFromSchemaNode(n)).filter((t): t is TableTarget => t !== undefined && t.objectType === 'table')
+      if (targets.length === 0) {
         window.showWarningMessage(t('table.onlyTablesCanTruncate'))
         return
       }
 
+      const names = targets.map(t => t.tableName).join(', ')
       const confirm = await window.showWarningMessage(
-        t('table.truncateConfirm', target.tableName),
+        targets.length === 1
+          ? t('table.truncateConfirm', targets[0].tableName)
+          : t('table.truncateMultipleConfirm', String(targets.length), names),
         { modal: true },
         t('table.truncate')
       )
       if (confirm !== t('table.truncate')) return
 
-      try {
-        await executeSql(target.profile, `TRUNCATE TABLE ${getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)}`, target.scope)
-        connectionsTreeProvider?.refreshTable(target.profile, target.tableName, target.scope)
-        TableDataPanel.refreshFor(target.profile, target.tableName, target.scope)
-        window.showInformationMessage(t('table.truncated', target.tableName))
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error)
-        window.showErrorMessage(t('table.truncateFailed', message))
+      let succeeded = 0
+      let failed = 0
+      for (const target of targets) {
+        try {
+          await executeSql(target.profile, `TRUNCATE TABLE ${getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)}`, target.scope)
+          connectionsTreeProvider?.refreshTable(target.profile, target.tableName, target.scope)
+          TableDataPanel.refreshFor(target.profile, target.tableName, target.scope)
+          succeeded++
+        } catch (error: unknown) {
+          failed++
+          const message = error instanceof Error ? error.message : String(error)
+          window.showErrorMessage(t('table.truncateFailed', `${target.tableName}: ${message}`))
+        }
+      }
+      if (succeeded > 0 && failed === 0) {
+        window.showInformationMessage(targets.length === 1 ? t('table.truncated', targets[0].tableName) : t('table.truncatedMultiple', String(succeeded)))
       }
     }),
     commands.registerCommand('dbNexus.copyTableName', async (node: SchemaNode | undefined) => {
@@ -1540,30 +1577,44 @@ export async function activate(context: ExtensionContext): Promise<void> {
       await env.clipboard.writeText(quoteSqlIdentifier(node.connectionProfile.driverId, node.index.name))
       window.showInformationMessage(t('table.copied'))
     }),
-    commands.registerCommand('dbNexus.deleteTable', async (node: SchemaNode | undefined) => {
-      const target = await resolveTableTarget(node)
-      if (!target) return
+    commands.registerCommand('dbNexus.deleteTable', async (node: SchemaNode | undefined, selectedNodes?: SchemaNode[]) => {
+      const nodes = getSelectedTableNodes(node, selectedNodes)
+      if (nodes.length === 0) return
 
+      const targets = nodes.map(n => resolveTableTargetFromSchemaNode(n)).filter((t): t is TableTarget => t !== undefined)
+      if (targets.length === 0) return
+
+      const names = targets.map(t => t.tableName).join(', ')
       const confirm = await window.showWarningMessage(
-        t('table.deleteConfirm', target.tableName),
+        targets.length === 1
+          ? t('table.deleteConfirm', targets[0].tableName)
+          : t('table.deleteMultipleConfirm', String(targets.length), names),
         { modal: true },
         t('common.delete')
       )
       if (confirm !== t('common.delete')) return
 
-      try {
-        const objectKind = target.objectType === 'view' || target.objectType === 'materializedView'
-          ? target.objectType === 'materializedView' ? 'MATERIALIZED VIEW' : 'VIEW'
-          : 'TABLE'
-        const qualifiedName = getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)
-        await executeSql(target.profile, `DROP ${objectKind} ${qualifiedName}`, target.scope)
-        TableDataPanel.closeTableFor(target.profile, target.tableName, target.scope)
-        TableSchemaPanel.closeTableFor(target.profile, target.tableName, target.scope)
-        connectionsTreeProvider?.refresh()
-        window.showInformationMessage(t('table.deleted', target.tableName))
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error)
-        window.showErrorMessage(t('table.deleteFailed', message))
+      let succeeded = 0
+      let failed = 0
+      for (const target of targets) {
+        try {
+          const objectKind = target.objectType === 'view' || target.objectType === 'materializedView'
+            ? target.objectType === 'materializedView' ? 'MATERIALIZED VIEW' : 'VIEW'
+            : 'TABLE'
+          const qualifiedName = getQualifiedObjectName(target.profile.driverId, target.scope, target.tableName)
+          await executeSql(target.profile, `DROP ${objectKind} ${qualifiedName}`, target.scope)
+          TableDataPanel.closeTableFor(target.profile, target.tableName, target.scope)
+          TableSchemaPanel.closeTableFor(target.profile, target.tableName, target.scope)
+          succeeded++
+        } catch (error: unknown) {
+          failed++
+          const message = error instanceof Error ? error.message : String(error)
+          window.showErrorMessage(t('table.deleteFailed', `${target.tableName}: ${message}`))
+        }
+      }
+      connectionsTreeProvider?.refresh()
+      if (succeeded > 0 && failed === 0) {
+        window.showInformationMessage(targets.length === 1 ? t('table.deleted', targets[0].tableName) : t('table.deletedMultiple', String(succeeded)))
       }
     }),
     commands.registerCommand('dbNexus.importWizard', async (node: SchemaNode | TablesGroupNode | undefined) => {
