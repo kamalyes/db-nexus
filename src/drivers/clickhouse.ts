@@ -58,12 +58,15 @@ export class ClickHouseDriver implements DatabaseDriver {
     return `${protocol}://${host}:${port}`
   }
 
-  private async query(profile: DbConnectionProfile, sql: string, shouldLog = true): Promise<ClickHouseResponse> {
+  private async query(profile: DbConnectionProfile, sql: string, shouldLog = true, database?: string): Promise<ClickHouseResponse> {
     const start = Date.now()
     const baseUrl = this.getBaseUrl(profile)
     const url = new URL(baseUrl)
     url.pathname = '/'
     url.searchParams.set('query', ensureJsonFormat(sql))
+    if (database) {
+      url.searchParams.set('database', database)
+    }
 
     const username = profile.username || 'default'
     const password = await this.getPassword(profile)
@@ -122,7 +125,7 @@ export class ClickHouseDriver implements DatabaseDriver {
   async testConnection(profile: DbConnectionProfile): Promise<ConnectionTestResult> {
     const start = Date.now()
     try {
-      await this.query(profile, 'SELECT 1')
+      await this.query(profile, 'SELECT 1', true, profile.database)
       return {
         ok: true,
         message: 'Connection successful',
@@ -193,7 +196,7 @@ export class ClickHouseDriver implements DatabaseDriver {
 
       sql += ' FORMAT JSON'
 
-      const result = await this.query(profile, sql, false)
+      const result = await this.query(profile, sql, false, request.database || profile.database)
 
       const columns = (result.meta || []).map(col => ({
         name: col.name,
