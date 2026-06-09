@@ -3,6 +3,7 @@ import { DbConnectionProfile, SchemaScope, QueryResult } from '@/core/types'
 import { DatabaseDriver } from '@/drivers/base'
 import { t } from '@/i18n'
 import { DriverRegistry } from '@/drivers/registry'
+import { formatSqlLiteral } from '@/core/sqlValue'
 
 export interface BackupOptions {
   includeData: boolean
@@ -223,19 +224,7 @@ export class BackupRestoreService {
     const columns = result.columns.map(c => c.name)
 
     for (const row of result.rows) {
-      const values = columns.map(col => {
-        const value = (row as Record<string, unknown>)[col]
-        if (value === null || value === undefined) {
-          return 'NULL'
-        }
-        if (typeof value === 'string') {
-          return `'${value.replace(/'/g, "''")}'`
-        }
-        if (value instanceof Date) {
-          return `'${value.toISOString()}'`
-        }
-        return String(value)
-      })
+      const values = columns.map(col => formatSqlLiteral((row as Record<string, unknown>)[col]))
 
       lines.push(`INSERT INTO ${tableName} (${columns.join(', ')}) VALUES (${values.join(', ')});`)
     }

@@ -1,5 +1,6 @@
 import { Uri, window, workspace } from 'vscode'
 import { QueryResult } from '@/core/types'
+import { formatExportValue, formatSqlLiteral } from '@/core/sqlValue'
 
 export class DataExportService {
   static async exportToCSV(result: QueryResult, defaultFileName: string): Promise<void> {
@@ -108,7 +109,7 @@ export class DataExportService {
 
     const escapeCSVValue = (value: unknown): string => {
       if (value === null || value === undefined) return ''
-      const str = String(value)
+      const str = formatExportValue(value)
       if (str.includes(',') || str.includes('"') || str.includes('\n')) {
         return `"${str.replace(/"/g, '""')}"`
       }
@@ -130,15 +131,8 @@ export class DataExportService {
     const columns = result.columns.map(c => c.name)
     const statements: string[] = []
 
-    const escapeSQLValue = (value: unknown): string => {
-      if (value === null || value === undefined) return 'NULL'
-      if (typeof value === 'number') return String(value)
-      if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE'
-      return `'${String(value).replace(/'/g, "''")}'`
-    }
-
     for (const row of result.rows) {
-      const values = columns.map(col => escapeSQLValue(row[col]))
+      const values = columns.map(col => formatSqlLiteral(row[col]))
       const columnList = columns.map(c => `"${c}"`).join(', ')
       const valueList = values.join(', ')
       statements.push(`INSERT INTO "${tableName}" (${columnList}) VALUES (${valueList});`)

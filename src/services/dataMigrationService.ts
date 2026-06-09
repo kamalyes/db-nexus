@@ -2,6 +2,7 @@ import { window, ProgressLocation } from 'vscode'
 import { DbConnectionProfile, SchemaScope } from '@/core/types'
 import { DatabaseDriver } from '@/drivers/base'
 import { t } from '@/i18n'
+import { formatSqlLiteral } from '@/core/sqlValue'
 
 export interface MigrationOptions {
   tables?: string[]
@@ -162,10 +163,7 @@ export class DataMigrationService {
 
       for (const row of result.rows) {
         const columns = result.columns.map(c => c.name)
-        const values = columns.map(col => {
-          const value = (row as Record<string, unknown>)[col]
-          return DataMigrationService._formatValue(value, targetProfile.driverId)
-        })
+        const values = columns.map(col => formatSqlLiteral((row as Record<string, unknown>)[col]))
 
         const insertSQL = `INSERT INTO ${tableName} (${columns.join(', ')}) VALUES (${values.join(', ')})`
         
@@ -185,25 +183,6 @@ export class DataMigrationService {
     }
 
     return totalRows
-  }
-
-  private static _formatValue(value: unknown, _driverId: string): string {
-    if (value === null || value === undefined) {
-      return 'NULL'
-    }
-    if (typeof value === 'string') {
-      return `'${value.replace(/'/g, "''")}'`
-    }
-    if (typeof value === 'boolean') {
-      return value ? 'TRUE' : 'FALSE'
-    }
-    if (value instanceof Date) {
-      return `'${value.toISOString()}'`
-    }
-    if (typeof value === 'object') {
-      return `'${JSON.stringify(value).replace(/'/g, "''")}'`
-    }
-    return String(value)
   }
 
   private static _adaptDDL(
