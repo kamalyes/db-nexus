@@ -634,9 +634,11 @@ export class PostgreSQLDriver implements DatabaseDriver {
     const schema = scope.schema
     const qualifiedTable = this.getQualifiedTableName(table, schema)
 
+    const tableSchema = await this.getTableSchema!(profile, table, scope)
+    const columnByName = new Map(tableSchema.columns.map(column => [column.name, column]))
     const rowColumns = Object.keys(row)
     const columns = rowColumns.map(quotePostgresIdentifier).join(', ')
-    const params = rowColumns.map((_, i) => `$${i + 1}`).join(', ')
+    const params = rowColumns.map((column, i) => formatPostgresMutationPlaceholder(i + 1, columnByName.get(column))).join(', ')
     const sql = rowColumns.length === 0
       ? `INSERT INTO ${qualifiedTable} DEFAULT VALUES`
       : `INSERT INTO ${qualifiedTable} (${columns}) VALUES (${params})`
@@ -647,7 +649,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
       schema,
       type: 'insert',
       sql,
-      parameters: Object.values(row),
+      parameters: rowColumns.map(column => normalizePostgresMutationValue(row[column], columnByName.get(column))),
       description: `Insert new row into ${qualifiedTable}`
     }
   }
@@ -670,13 +672,20 @@ export class PostgreSQLDriver implements DatabaseDriver {
       throw new Error('Cannot update table without primary key')
     }
 
+    const columnByName = new Map(tableSchema.columns.map(column => [column.name, column]))
     const setColumns = Object.keys(row)
+      .filter(column => {
+        if (!Object.prototype.hasOwnProperty.call(originalRow, column)) {
+          return true
+        }
+        return !postgresMutationValuesEqual(row[column], originalRow[column], columnByName.get(column))
+      })
     if (setColumns.length === 0) {
       throw new Error('Cannot update row without editable columns')
     }
 
     const setClauses = setColumns
-      .map((k, i) => `${quotePostgresIdentifier(k)} = $${i + 1}`)
+      .map((column, i) => `${quotePostgresIdentifier(column)} = ${formatPostgresMutationPlaceholder(i + 1, columnByName.get(column))}`)
       .join(', ')
 
     const whereClauses = primaryKeyColumns
@@ -692,7 +701,7 @@ export class PostgreSQLDriver implements DatabaseDriver {
       type: 'update',
       sql,
       parameters: [
-        ...setColumns.map(column => row[column]),
+        ...setColumns.map(column => normalizePostgresMutationValue(row[column], columnByName.get(column))),
         ...primaryKeyColumns.map(column => originalRow[column])
       ],
       description: `Update row in ${qualifiedTable}`
@@ -956,4 +965,69 @@ function formatPostgresColumnType(row: Record<string, unknown>): string {
 
 function quotePostgresIdentifier(value: string): string {
   return `"${value.replace(/"/g, '""')}"`
+}
+
+function formatPostgresMutationPlaceholder(index: number, column: TableColumn | undefined): string {
+  const placeholder = `$${index}`
+  if (!column) {
+    return placeholder
+  }
+
+  const normalizedType = column.type.trim().toLowerCase()
+  if (normalizedType === 'jsonb') {
+    return `${placeholder}::jsonb`
+  }
+  if (normalizedType === 'json') {
+    return `${placeholder}::json`
+  }
+  return placeholder
+}
+
+function normalizePostgresMutationValue(value: unknown, column: TableColumn | undefined): unknown {
+  if (!isPostgresJsonColumn(column) || value === null || value === undefined) {
+    return value
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (!trimmed) {
+      return value
+    }
+    return JSON.stringify(JSON.parse(trimmed))
+  }
+
+  return JSON.stringify(value)
+}
+
+function postgresMutationValuesEqual(left: unknown, right: unknown, column: TableColumn | undefined): boolean {
+  if (isPostgresJsonColumn(column)) {
+    return jsonComparableValue(left) === jsonComparableValue(right)
+  }
+  return left === right
+}
+
+function jsonComparableValue(value: unknown): string {
+  if (value === null || value === undefined) {
+    return ''
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (!trimmed) {
+      return ''
+    }
+    try {
+      return JSON.stringify(JSON.parse(trimmed))
+    } catch {
+      return trimmed
+    }
+  }
+  return JSON.stringify(value)
+}
+
+function isPostgresJsonColumn(column: TableColumn | undefined): boolean {
+  if (!column) {
+    return false
+  }
+  const normalizedType = column.type.trim().toLowerCase()
+  return normalizedType === 'json' || normalizedType === 'jsonb'
 }
