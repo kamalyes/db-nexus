@@ -6,7 +6,8 @@ import { DataExportService } from '@/services/dataExportService'
 import { SqlExecutionLogService } from '@/services/sqlExecutionLogService'
 
 export class TableDataPanel {
-  private static currentPanel: TableDataPanel | undefined
+  /** 已打开的表数据面板,按 profile+scope+表名 唯一索引,支持同一连接下多表并存 */
+  private static readonly panels = new Map<string, TableDataPanel>()
   private readonly _panel: WebviewPanel
   private _disposables: any[] = []
   private _profile: DbConnectionProfile
@@ -23,6 +24,11 @@ export class TableDataPanel {
   private _sorts: { column: string; direction: 'ASC' | 'DESC' }[] = []
   private _disposed = false
 
+  /** 生成面板在 Map 中的唯一 key */
+  private static _keyFor(profile: DbConnectionProfile, tableName: string, scope: SchemaScope): string {
+    return `${profile.id}:${scope.database || ''}:${scope.schema || ''}:${scope.parentName || ''}:${tableName}`
+  }
+
   static show(
     context: ExtensionContext,
     profile: DbConnectionProfile,
@@ -30,23 +36,25 @@ export class TableDataPanel {
     tableName: string,
     scope: SchemaScope
   ): void {
-    const column = ViewColumn.One
-
-    if (TableDataPanel.currentPanel) {
-      TableDataPanel.currentPanel.dispose()
+    const key = TableDataPanel._keyFor(profile, tableName, scope)
+    const existing = TableDataPanel.panels.get(key)
+    if (existing) {
+      // 已存在同表面板:聚焦到该面板,不重复创建
+      existing._panel.reveal(ViewColumn.One, false)
+      return
     }
 
     const panel = window.createWebviewPanel(
       'dbNexus.tableData',
       t('table.dataTitle', tableName),
-      column,
+      ViewColumn.One,
       {
         enableScripts: true,
         retainContextWhenHidden: true
       }
     )
 
-    TableDataPanel.currentPanel = new TableDataPanel(
+    const instance = new TableDataPanel(
       panel,
       context,
       profile,
@@ -54,19 +62,23 @@ export class TableDataPanel {
       tableName,
       scope
     )
+    TableDataPanel.panels.set(key, instance)
   }
 
   static closeFor(profile: DbConnectionProfile): boolean {
-    if (TableDataPanel.currentPanel?._profile.id !== profile.id) {
-      return false
+    const toClose: TableDataPanel[] = []
+    for (const panel of TableDataPanel.panels.values()) {
+      if (panel._profile.id === profile.id) {
+        toClose.push(panel)
+      }
     }
-
-    TableDataPanel.currentPanel.dispose()
-    return true
+    toClose.forEach(panel => panel.dispose())
+    return toClose.length > 0
   }
 
   static closeTableFor(profile: DbConnectionProfile, tableName: string, scope: SchemaScope = {}): boolean {
-    const panel = TableDataPanel.currentPanel
+    const key = TableDataPanel._keyFor(profile, tableName, scope)
+    const panel = TableDataPanel.panels.get(key)
     if (!panel || !panel._matchesTable(profile, tableName, scope)) {
       return false
     }
@@ -76,7 +88,8 @@ export class TableDataPanel {
   }
 
   static refreshFor(profile: DbConnectionProfile, tableName: string, scope: SchemaScope = {}): boolean {
-    const panel = TableDataPanel.currentPanel
+    const key = TableDataPanel._keyFor(profile, tableName, scope)
+    const panel = TableDataPanel.panels.get(key)
     if (!panel || !panel._matchesTable(profile, tableName, scope)) {
       return false
     }
@@ -504,7 +517,11 @@ export class TableDataPanel {
   }
 
   private _isActive(): boolean {
-    return !this._disposed && TableDataPanel.currentPanel === this
+    if (this._disposed) {
+      return false
+    }
+    const key = TableDataPanel._keyFor(this._profile, this._tableName, this._scope)
+    return TableDataPanel.panels.get(key) === this
   }
 
   private _matchesTable(profile: DbConnectionProfile, tableName: string, scope: SchemaScope): boolean {
@@ -3146,8 +3163,9 @@ export class TableDataPanel {
     }
 
     this._disposed = true
-    if (TableDataPanel.currentPanel === this) {
-      TableDataPanel.currentPanel = undefined
+    const key = TableDataPanel._keyFor(this._profile, this._tableName, this._scope)
+    if (TableDataPanel.panels.get(key) === this) {
+      TableDataPanel.panels.delete(key)
     }
 
     if (!panelAlreadyDisposed) {

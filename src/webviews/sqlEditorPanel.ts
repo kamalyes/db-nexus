@@ -1,5 +1,6 @@
 import { ExtensionContext, Uri, ViewColumn, WebviewPanel, window, workspace } from 'vscode'
 import { DbConnectionProfile, DatabaseDriverId, QueryResult, SchemaObject, SchemaScope } from '@/core/types'
+import { splitSqlStatements } from '@/core/sqlSplitter'
 import { DriverRegistry } from '@/drivers/registry'
 import { t } from '@/i18n'
 import { ConnectionService } from '@/services/connectionService'
@@ -52,6 +53,10 @@ export class SqlEditorPanel {
   private uri: Uri | undefined
   private stateRequestId = 0
   private lastResult: QueryResult | undefined
+  /** 最近一次多语句执行的各项结果,用于切换查看与导出当前结果 */
+  private lastItems: Array<{ sql: string; status: 'success' | 'error'; result?: QueryResult; error?: string }> = []
+  /** 当前查看的结果项索引,用于导出时取对应 SQL */
+  private currentResultIndex = 0
 
   static show(
     context: ExtensionContext,
@@ -170,6 +175,17 @@ export class SqlEditorPanel {
     if (message.type === 'exportResult' && typeof message.format === 'string') {
       await this.handleExportResult(message.format as 'csv' | 'json' | 'sql')
     }
+
+    if (message.type === 'selectResult' && typeof message.index === 'number') {
+      this.selectResult(message.index)
+    }
+  }
+
+  /** 切换当前查看的结果项,同步 lastResult 以便导出使用当前结果 */
+  private selectResult(index: number): void {
+    this.currentResultIndex = index
+    const item = this.lastItems[index]
+    this.lastResult = item && item.status === 'success' ? item.result : undefined
   }
 
   private async handleExportResult(format: 'csv' | 'json' | 'sql'): Promise<void> {
@@ -186,7 +202,9 @@ export class SqlEditorPanel {
       } else if (format === 'json') {
         await DataExportService.exportToJSON(result, defaultFileName)
       } else {
-        const tableName = this.guessTableNameFromSql(this.sql) || 'query_result'
+        const currentItem = this.lastItems[this.currentResultIndex]
+        const sqlForTable = currentItem ? currentItem.sql : this.sql
+        const tableName = this.guessTableNameFromSql(sqlForTable) || 'query_result'
         await DataExportService.exportToSQL(result, tableName, defaultFileName)
       }
     } catch (error: unknown) {
@@ -431,25 +449,74 @@ export class SqlEditorPanel {
       return
     }
 
+    // 按分号拆分为多条独立语句,逐条执行并收集结果
+    const statements = splitSqlStatements(querySql)
+    if (statements.length === 0) {
+      window.showWarningMessage(t('query.empty'))
+      return
+    }
+
+    type ResultItem = {
+      sql: string
+      status: 'success' | 'error'
+      result?: QueryResult
+      error?: string
+    }
+
     this.panel.webview.postMessage({ type: 'busy', value: true })
-    const start = Date.now()
+    const totalStart = Date.now()
+    const items: ResultItem[] = []
     try {
-      const result = await this.queryService.run(profile, {
-        sql: querySql,
-        database: this.scope.database,
-        schema: this.scope.schema
-      })
-      await SqlExecutionLogService.getInstance().record(querySql, profile, result, Date.now() - start)
-      const webviewResult = this.toWebviewResult(result)
-      this.lastResult = webviewResult
-      this.panel.webview.postMessage({ type: 'result', result: webviewResult })
-      this.panel.webview.postMessage({ type: 'status', message: `${result.rowCount} rows, ${result.elapsedMs} ms` })
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error)
-      await SqlExecutionLogService.getInstance().record(querySql, profile, error instanceof Error ? error : new Error(message), Date.now() - start)
-      this.lastResult = undefined
-      this.panel.webview.postMessage({ type: 'resultError', message })
-      this.panel.webview.postMessage({ type: 'status', message })
+      for (const stmt of statements) {
+        const stmtStart = Date.now()
+        try {
+          const result = await this.queryService.run(profile, {
+            sql: stmt.sql,
+            database: this.scope.database,
+            schema: this.scope.schema
+          })
+          await SqlExecutionLogService.getInstance().record(stmt.sql, profile, result, Date.now() - stmtStart)
+          items.push({ sql: stmt.sql, status: 'success', result: this.toWebviewResult(result) })
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error)
+          await SqlExecutionLogService.getInstance().record(stmt.sql, profile, error instanceof Error ? error : new Error(message), Date.now() - stmtStart)
+          items.push({ sql: stmt.sql, status: 'error', error: message })
+        }
+      }
+
+      // 默认展示:优先最后一个有结果集(有列且有行)的成功项,否则最后一项
+      let defaultIndex = items.length - 1
+      for (let i = items.length - 1; i >= 0; i--) {
+        const item = items[i]
+        if (item.status === 'success' && item.result && item.result.columns.length > 0 && item.result.rows.length > 0) {
+          defaultIndex = i
+          break
+        }
+      }
+      const defaultItem = items[defaultIndex]
+      this.lastResult = defaultItem && defaultItem.status === 'success' ? defaultItem.result : undefined
+      this.currentResultIndex = defaultIndex
+
+      const elapsed = Date.now() - totalStart
+      const successCount = items.filter(i => i.status === 'success').length
+      const failedCount = items.length - successCount
+      let statusMessage: string
+      if (items.length === 1) {
+        const item = items[0]
+        statusMessage = item.status === 'success' && item.result
+          ? `${item.result.rowCount} rows, ${item.result.elapsedMs} ms`
+          : (item.error || 'Error')
+      } else {
+        statusMessage = `${items.length} statements: ${successCount} ok`
+        if (failedCount > 0) {
+          statusMessage += `, ${failedCount} failed`
+        }
+        statusMessage += ` (${elapsed} ms)`
+      }
+
+      this.panel.webview.postMessage({ type: 'multiResult', items, defaultIndex })
+      this.panel.webview.postMessage({ type: 'status', message: statusMessage })
+      this.lastItems = items
     } finally {
       this.panel.webview.postMessage({ type: 'busy', value: false })
     }
@@ -778,6 +845,21 @@ export class SqlEditorPanel {
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .result-switcher {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+    .result-switcher button {
+      min-width: 24px;
+      padding: 0 6px;
+    }
+    .result-switcher span {
+      font-size: 12px;
+      white-space: nowrap;
+      color: var(--vscode-descriptionForeground);
+    }
     .results-wrap {
       min-height: 0;
       overflow: auto;
@@ -885,6 +967,11 @@ export class SqlEditorPanel {
     <section class="results-panel hidden" id="resultPanel">
       <div class="results-header">
         <strong id="resultSummary">Results</strong>
+        <div class="result-switcher hidden" id="resultSwitcher">
+          <button id="prevResultBtn" title="Previous result">&lsaquo;</button>
+          <span id="resultIndexLabel">1/1</span>
+          <button id="nextResultBtn" title="Next result">&rsaquo;</button>
+        </div>
         <div class="spacer"></div>
         <select id="exportFormatSelect" title="${t('table.exportFormat')}">
           <option value="csv">CSV</option>
@@ -925,6 +1012,13 @@ export class SqlEditorPanel {
     const resultPanel = document.getElementById('resultPanel');
     const resultSummary = document.getElementById('resultSummary');
     const resultBody = document.getElementById('resultBody');
+    const resultSwitcher = document.getElementById('resultSwitcher');
+    const resultIndexLabel = document.getElementById('resultIndexLabel');
+    const prevResultBtn = document.getElementById('prevResultBtn');
+    const nextResultBtn = document.getElementById('nextResultBtn');
+    // 多语句执行的结果列表与当前查看索引
+    let resultItems = [];
+    let currentResultIndex = 0;
     const closeResultButton = document.getElementById('closeResultButton');
     const sqlKeywords = [
       'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP', 'FROM', 'WHERE',
@@ -1367,6 +1461,24 @@ export class SqlEditorPanel {
       return String(value);
     }
 
+    function renderResultItem(index) {
+      const item = resultItems[index];
+      if (!item) return;
+      currentResultIndex = index;
+      // 更新切换器标签与按钮可用状态
+      resultIndexLabel.textContent = (index + 1) + '/' + resultItems.length;
+      prevResultBtn.disabled = index === 0;
+      nextResultBtn.disabled = index === resultItems.length - 1;
+      // 渲染当前项:成功显示结果表格,失败显示错误
+      if (item.status === 'success') {
+        renderResult(item.result || {});
+      } else {
+        renderResultError(item.error || 'Query failed');
+      }
+      // 通知扩展当前查看项,导出时使用对应结果
+      vscode.postMessage({ type: 'selectResult', index });
+    }
+
     function renderResult(result) {
       workbench.classList.add('has-result');
       resultPanel.classList.remove('hidden');
@@ -1452,10 +1564,30 @@ export class SqlEditorPanel {
         status.textContent = message.message || 'Ready';
       }
       if (message.type === 'result') {
-        renderResult(message.result || {});
+        // 兼容单条结果:包装成单项 multiResult
+        resultItems = [{ status: 'success', result: message.result || {} }];
+        resultSwitcher.classList.add('hidden');
+        renderResultItem(0);
       }
       if (message.type === 'resultError') {
-        renderResultError(message.message);
+        resultItems = [{ status: 'error', error: message.message || 'Query failed' }];
+        resultSwitcher.classList.add('hidden');
+        renderResultItem(0);
+      }
+      if (message.type === 'multiResult') {
+        resultItems = message.items || [];
+        if (resultItems.length === 0) {
+          hideResult();
+        } else {
+          // 多于一项时显示切换器
+          if (resultItems.length > 1) {
+            resultSwitcher.classList.remove('hidden');
+          } else {
+            resultSwitcher.classList.add('hidden');
+          }
+          const defaultIndex = Math.min(message.defaultIndex || 0, resultItems.length - 1);
+          renderResultItem(defaultIndex);
+        }
       }
       if (message.type === 'formatted' && typeof message.sql === 'string') {
         editor.value = message.sql;
@@ -1560,6 +1692,17 @@ export class SqlEditorPanel {
     });
     askAiButton.addEventListener('click', () => vscode.postMessage({ type: 'askAi', sql: editor.value }));
     closeResultButton.addEventListener('click', hideResult);
+    // 结果切换器:上一条 / 下一条
+    prevResultBtn.addEventListener('click', () => {
+      if (currentResultIndex > 0) {
+        renderResultItem(currentResultIndex - 1);
+      }
+    });
+    nextResultBtn.addEventListener('click', () => {
+      if (currentResultIndex < resultItems.length - 1) {
+        renderResultItem(currentResultIndex + 1);
+      }
+    });
     // 导出查询结果:发送格式给扩展端,扩展端使用最近一次保存的 result 进行导出
     document.getElementById('exportResultButton')?.addEventListener('click', () => {
       const formatSelect = document.getElementById('exportFormatSelect');
