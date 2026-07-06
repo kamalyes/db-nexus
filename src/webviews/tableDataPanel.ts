@@ -174,6 +174,9 @@ export class TableDataPanel {
           case 'export':
             await this._handleExport(message.format, message.rows, message.columns)
             break
+          case 'copyInsertSql':
+            await this._handleCopyInsertSql(message.rows, message.columns)
+            break
         }
       },
       null,
@@ -480,6 +483,25 @@ export class TableDataPanel {
       } else {
         await DataExportService.exportToSQL(result, this._tableName, defaultFileName)
       }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      this._sendMessage({ type: 'operationError', error: t('export.failed', message) })
+    }
+  }
+
+  private async _handleCopyInsertSql(
+    rows: Record<string, unknown>[],
+    columns: string[]
+  ): Promise<void> {
+    try {
+      if (!Array.isArray(rows) || rows.length === 0 || !Array.isArray(columns) || columns.length === 0) {
+        this._sendMessage({ type: 'operationError', error: t('table.exportNoData') })
+        return
+      }
+
+      const sql = DataExportService.generateInsertStatements(rows, columns, this._tableName)
+      await env.clipboard.writeText(sql)
+      window.showInformationMessage(t('table.copyInsertSqlSuccess', rows.length))
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
       this._sendMessage({ type: 'operationError', error: t('export.failed', message) })
@@ -1194,6 +1216,7 @@ export class TableDataPanel {
     </table>
   </div>
   <div class="context-menu hidden" id="rowContextMenu">
+    <button id="contextCopyInsert" type="button">${this._escapeHtml(t('table.copyInsertSql'))}</button>
     <button id="contextDeleteRow" type="button">Delete row</button>
     <button id="contextUndoDelete" type="button">Undo delete</button>
   </div>
@@ -1498,6 +1521,15 @@ export class TableDataPanel {
       });
     });
 
+    document.getElementById('contextCopyInsert')?.addEventListener('click', () => {
+      if (contextRowIndex === null) return;
+      // 右键行在选中集合中时复制所有选中行,否则只复制右键行
+      const targets = selectedRows.has(contextRowIndex) ? selectedRowIndexes() : [contextRowIndex];
+      const targetRows = targets.map(index => rows[index]).filter(Boolean);
+      if (targetRows.length === 0) return;
+      hideRowContextMenu();
+      vscode.postMessage({ type: 'copyInsertSql', rows: targetRows, columns });
+    });
     document.getElementById('contextDeleteRow')?.addEventListener('click', () => {
       if (contextRowIndex === null) return;
       const targets = selectedRows.has(contextRowIndex) ? selectedRowIndexes() : [contextRowIndex];

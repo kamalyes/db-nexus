@@ -124,14 +124,15 @@ export class DataExportService {
     return [header, ...rows].join('\n')
   }
 
-  private static _convertToInsertStatements(
-    result: QueryResult,
+  /** 将行数据生成 INSERT 语句字符串(每行一条,用换行分隔) */
+  static generateInsertStatements(
+    rows: Record<string, unknown>[],
+    columns: string[],
     tableName: string
   ): string {
-    const columns = result.columns.map(c => c.name)
     const statements: string[] = []
 
-    for (const row of result.rows) {
+    for (const row of rows) {
       const values = columns.map(col => formatSqlLiteral(row[col]))
       const columnList = columns.map(c => `"${c}"`).join(', ')
       const valueList = values.join(', ')
@@ -139,6 +140,14 @@ export class DataExportService {
     }
 
     return statements.join('\n')
+  }
+
+  private static _convertToInsertStatements(
+    result: QueryResult,
+    tableName: string
+  ): string {
+    const columns = result.columns.map(c => c.name)
+    return this.generateInsertStatements(result.rows, columns, tableName)
   }
 
   private static _parseCSV(text: string): Record<string, unknown>[] {

@@ -131,6 +131,8 @@
     "truncatedMultiple": "{0} tables truncated",
     "truncateFailed": "Failed to truncate table: {0}",
     "copied": "Copied to clipboard",
+    "copyInsertSql": "Copy as INSERT statements",
+    "copyInsertSqlSuccess": "Copied {0} INSERT statements to clipboard",
     "selectColumn": "Please select a column",
     "renameColumnName": "New column name",
     "renameColumnMode": "Rename column action",

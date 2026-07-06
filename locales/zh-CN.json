@@ -131,6 +131,8 @@
     "truncatedMultiple": "已清空 {0} 个表",
     "truncateFailed": "清空表失败：{0}",
     "copied": "已复制到剪贴板",
+    "copyInsertSql": "复制为 INSERT 语句",
+    "copyInsertSqlSuccess": "已复制 {0} 条 INSERT 语句到剪贴板",
     "selectColumn": "请选择一个字段",
     "renameColumnName": "新的字段名",
     "renameColumnMode": "重命名字段方式",
