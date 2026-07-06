@@ -2,6 +2,7 @@ import { ExtensionContext, ViewColumn, WebviewPanel, env, window } from 'vscode'
 import { DbConnectionProfile, QueryResult, TableSchema, SchemaScope, DataQueryOptions, MutationPlan, DataEditResult } from '@/core/types'
 import { DatabaseDriver } from '@/drivers/base'
 import { t } from '@/i18n'
+import { DataExportService } from '@/services/dataExportService'
 import { SqlExecutionLogService } from '@/services/sqlExecutionLogService'
 
 export class TableDataPanel {
@@ -156,6 +157,9 @@ export class TableDataPanel {
             } catch {
               this._panel.webview.postMessage({ type: 'clipboardContent', text: '', targetColumn: message.targetColumn, startRowIndex: message.startRowIndex })
             }
+            break
+          case 'export':
+            await this._handleExport(message.format, message.rows, message.columns)
             break
         }
       },
@@ -435,6 +439,38 @@ export class TableDataPanel {
 
   private _formatMutationSql(plan: MutationPlan): string {
     return SqlExecutionLogService.formatSqlWithParameters(plan.sql, plan.parameters)
+  }
+
+  private async _handleExport(
+    format: 'csv' | 'json' | 'sql',
+    rows: Record<string, unknown>[],
+    columns: string[]
+  ): Promise<void> {
+    try {
+      if (!Array.isArray(rows) || rows.length === 0 || !Array.isArray(columns) || columns.length === 0) {
+        this._sendMessage({ type: 'operationError', error: t('table.exportNoData') })
+        return
+      }
+
+      const result: QueryResult = {
+        columns: columns.map(name => ({ name })),
+        rows,
+        rowCount: rows.length,
+        elapsedMs: 0
+      }
+      const defaultFileName = `${this._tableName}_${rows.length}rows`
+
+      if (format === 'csv') {
+        await DataExportService.exportToCSV(result, defaultFileName)
+      } else if (format === 'json') {
+        await DataExportService.exportToJSON(result, defaultFileName)
+      } else {
+        await DataExportService.exportToSQL(result, this._tableName, defaultFileName)
+      }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      this._sendMessage({ type: 'operationError', error: t('export.failed', message) })
+    }
   }
 
   private _sendMessage(message: any): void {
@@ -1098,6 +1134,12 @@ export class TableDataPanel {
   <div class="toolbar">
     <button id="refreshBtn" class="secondary" title="Refresh (F5)">${this._escapeHtml(t('common.refresh'))}</button>
     <span class="page-info" id="selectionStatus">0 selected</span>
+    <select id="exportFormatSelect" title="${this._escapeAttr(t('table.exportFormat'))}" class="export-select">
+      <option value="csv">CSV</option>
+      <option value="json">JSON</option>
+      <option value="sql">SQL</option>
+    </select>
+    <button id="exportBtn" class="secondary" title="${this._escapeAttr(t('table.exportCurrentPage'))}">${this._escapeHtml(t('table.export'))}</button>
     <div class="stats">${this._escapeHtml(statsText)} / ${this._escapeHtml(pageInfo)} / ${this._escapeHtml(elapsedText)}</div>
   </div>
 
@@ -1193,6 +1235,11 @@ export class TableDataPanel {
     let pendingDeleteTargets = [];
     let contextRowIndex = null;
     let commitInFlight = false;
+    // 导出按钮文案
+    const exportLabel = ${this._escapeScriptJson(JSON.stringify(t('table.export')))};
+    const exportSelectedLabel = ${this._escapeScriptJson(JSON.stringify(t('table.exportSelected')))};
+    const exportSelectedTitle = ${this._escapeScriptJson(JSON.stringify(t('table.exportSelectedTitle')))};
+    const exportCurrentPageTitle = ${this._escapeScriptJson(JSON.stringify(t('table.exportCurrentPage')))};
 
     document.getElementById('refreshBtn').addEventListener('click', () => {
       vscode.postMessage({ type: 'refresh' });
@@ -1203,6 +1250,24 @@ export class TableDataPanel {
         event.stopPropagation();
         vscode.postMessage({ type: 'refresh' });
       }
+    });
+
+    // 导出按钮:有选中行则导出选中,否则导出当前页全部行
+    document.getElementById('exportBtn')?.addEventListener('click', () => {
+      if (commitInFlight || rows.length === 0) return;
+      const formatSelect = document.getElementById('exportFormatSelect');
+      const format = formatSelect ? formatSelect.value : 'csv';
+      const selectedIndexes = selectedRowIndexes();
+      const targetRows = selectedIndexes.length > 0
+        ? selectedIndexes.map(index => rows[index]).filter(Boolean)
+        : rows.slice();
+      if (targetRows.length === 0) return;
+      vscode.postMessage({
+        type: 'export',
+        format,
+        rows: targetRows,
+        columns
+      });
     });
 
     function selectedRowIndexes() {
@@ -1253,6 +1318,19 @@ export class TableDataPanel {
         selectAll.checked = selectableRows > 0 && count === selectableRows;
         selectAll.indeterminate = count > 0 && count < selectableRows;
         selectAll.disabled = commitInFlight || selectableRows === 0;
+      }
+
+      // 更新导出按钮:有选中行时导出选中,否则导出当前页
+      const exportBtn = document.getElementById('exportBtn');
+      if (exportBtn) {
+        if (count > 0) {
+          exportBtn.textContent = exportSelectedLabel.replace('{0}', String(count));
+          exportBtn.title = exportSelectedTitle.replace('{0}', String(count));
+        } else {
+          exportBtn.textContent = exportLabel;
+          exportBtn.title = exportCurrentPageTitle;
+        }
+        exportBtn.disabled = commitInFlight || rows.length === 0;
       }
     }
 

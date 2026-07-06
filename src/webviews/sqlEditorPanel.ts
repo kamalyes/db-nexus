@@ -3,6 +3,7 @@ import { DbConnectionProfile, DatabaseDriverId, QueryResult, SchemaObject, Schem
 import { DriverRegistry } from '@/drivers/registry'
 import { t } from '@/i18n'
 import { ConnectionService } from '@/services/connectionService'
+import { DataExportService } from '@/services/dataExportService'
 import { SqlExecutionLogService } from '@/services/sqlExecutionLogService'
 import { QueryService } from '@/services/queryService'
 import { ExecutionPlanPanel } from './executionPlanPanel'
@@ -50,6 +51,7 @@ export class SqlEditorPanel {
   private readonly contextLabel: string | undefined
   private uri: Uri | undefined
   private stateRequestId = 0
+  private lastResult: QueryResult | undefined
 
   static show(
     context: ExtensionContext,
@@ -164,6 +166,39 @@ export class SqlEditorPanel {
     if (message.type === 'refreshMetadata') {
       await this.postState({ includeMetadata: true })
     }
+
+    if (message.type === 'exportResult' && typeof message.format === 'string') {
+      await this.handleExportResult(message.format as 'csv' | 'json' | 'sql')
+    }
+  }
+
+  private async handleExportResult(format: 'csv' | 'json' | 'sql'): Promise<void> {
+    const result = this.lastResult
+    if (!result || result.rows.length === 0 || result.columns.length === 0) {
+      window.showWarningMessage(t('table.exportNoData'))
+      return
+    }
+
+    try {
+      const defaultFileName = `query_result_${result.rows.length}rows`
+      if (format === 'csv') {
+        await DataExportService.exportToCSV(result, defaultFileName)
+      } else if (format === 'json') {
+        await DataExportService.exportToJSON(result, defaultFileName)
+      } else {
+        const tableName = this.guessTableNameFromSql(this.sql) || 'query_result'
+        await DataExportService.exportToSQL(result, tableName, defaultFileName)
+      }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      window.showErrorMessage(t('export.failed', message))
+    }
+  }
+
+  private guessTableNameFromSql(sql: string): string | undefined {
+    const match = /\b(?:from|into|update|join)\s+([`"\[]?[A-Za-z0-9_$.-]+[`"\]]?)/i.exec(sql || '')
+    if (!match) return undefined
+    return match[1].replace(/^[`"\[]+|[`"\]]+$/g, '').split('.').pop()
   }
 
   private async postFastStateThenMetadata(): Promise<void> {
@@ -405,11 +440,14 @@ export class SqlEditorPanel {
         schema: this.scope.schema
       })
       await SqlExecutionLogService.getInstance().record(querySql, profile, result, Date.now() - start)
-      this.panel.webview.postMessage({ type: 'result', result: this.toWebviewResult(result) })
+      const webviewResult = this.toWebviewResult(result)
+      this.lastResult = webviewResult
+      this.panel.webview.postMessage({ type: 'result', result: webviewResult })
       this.panel.webview.postMessage({ type: 'status', message: `${result.rowCount} rows, ${result.elapsedMs} ms` })
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
       await SqlExecutionLogService.getInstance().record(querySql, profile, error instanceof Error ? error : new Error(message), Date.now() - start)
+      this.lastResult = undefined
       this.panel.webview.postMessage({ type: 'resultError', message })
       this.panel.webview.postMessage({ type: 'status', message })
     } finally {
@@ -848,6 +886,12 @@ export class SqlEditorPanel {
       <div class="results-header">
         <strong id="resultSummary">Results</strong>
         <div class="spacer"></div>
+        <select id="exportFormatSelect" title="${t('table.exportFormat')}">
+          <option value="csv">CSV</option>
+          <option value="json">JSON</option>
+          <option value="sql">SQL</option>
+        </select>
+        <button id="exportResultButton" title="${t('table.export')}">${t('table.export')}</button>
         <button id="closeResultButton" title="Hide results">Close</button>
       </div>
       <div class="results-wrap" id="resultBody"></div>
@@ -1329,6 +1373,11 @@ export class SqlEditorPanel {
       resultSummary.textContent = (result.rowCount || 0) + ' rows, ' + (result.elapsedMs || 0) + ' ms';
 
       const columns = result.columns || [];
+      const exportBtn = document.getElementById('exportResultButton');
+      if (exportBtn) {
+        exportBtn.disabled = !columns.length || !(result.rows || []).length;
+      }
+
       if (columns.length === 0) {
         resultBody.innerHTML = '<div class="result-empty">Done</div>';
         return;
@@ -1353,6 +1402,8 @@ export class SqlEditorPanel {
       resultPanel.classList.remove('hidden');
       resultSummary.textContent = 'Error';
       resultBody.innerHTML = '<div class="result-error">' + escapeHtml(message || 'Query failed') + '</div>';
+      const exportBtn = document.getElementById('exportResultButton');
+      if (exportBtn) exportBtn.disabled = true;
     }
 
     function hideResult() {
@@ -1509,6 +1560,12 @@ export class SqlEditorPanel {
     });
     askAiButton.addEventListener('click', () => vscode.postMessage({ type: 'askAi', sql: editor.value }));
     closeResultButton.addEventListener('click', hideResult);
+    // 导出查询结果:发送格式给扩展端,扩展端使用最近一次保存的 result 进行导出
+    document.getElementById('exportResultButton')?.addEventListener('click', () => {
+      const formatSelect = document.getElementById('exportFormatSelect');
+      const format = formatSelect ? formatSelect.value : 'csv';
+      vscode.postMessage({ type: 'exportResult', format });
+    });
     suggestions.addEventListener('mousedown', event => {
       const row = event.target && event.target.closest ? event.target.closest('.suggestion') : null;
       if (!row) return;
