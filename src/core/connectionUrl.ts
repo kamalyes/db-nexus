@@ -307,11 +307,11 @@ function toOptionalBoolean(value: string | null | undefined): boolean | undefine
 
 function addCommonConnectionParams(params: URLSearchParams, profile: DbConnectionProfile): void {
   params.set('name', profile.name)
-  if (profile.ssl !== undefined) {
-    params.set('ssl', String(profile.ssl))
-  }
+  // sslMode 存在时只输出 sslmode(ssl boolean 可由 sslMode 推导,避免冗余)
   if (profile.sslMode) {
     params.set('sslmode', profile.sslMode)
+  } else if (profile.ssl !== undefined) {
+    params.set('ssl', String(profile.ssl))
   }
   if (profile.clientDriver) {
     params.set('clientDriver', profile.clientDriver)
