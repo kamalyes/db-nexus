@@ -1,6 +1,6 @@
 import path from 'path'
 import { SUPPORTED_DRIVERS } from './constants'
-import { DatabaseDriverId, DbConnectionProfile } from './types'
+import { DatabaseDriverId, DbConnectionProfile, SslMode } from './types'
 
 export interface ParsedConnectionUrl {
   profile: Omit<DbConnectionProfile, 'id' | 'createdAt' | 'updatedAt'>
@@ -99,6 +99,7 @@ export function parseConnectionUrl(input: string): ParsedConnectionUrl {
     username,
     filePath,
     ssl: resolveSsl(url, params),
+    sslMode: resolveSslMode(params),
     clientDriver: params.get('clientDriver') || params.get('client') || undefined,
     charset: params.get('charset') || undefined,
     keepAliveInterval: toOptionalNumber(params.get('keepAliveInterval')),
@@ -273,6 +274,17 @@ function resolveSsl(url: URL, params: URLSearchParams): boolean | undefined {
   return undefined
 }
 
+/** 从连接 URL 参数解析 sslMode 枚举值 */
+function resolveSslMode(params: URLSearchParams): SslMode | undefined {
+  const raw = params.get('sslmode')
+  if (!raw) {
+    return undefined
+  }
+  const normalized = raw.trim().toLowerCase()
+  const VALID_MODES: SslMode[] = ['disable', 'prefer', 'require', 'verify-ca', 'verify-full']
+  return VALID_MODES.includes(normalized as SslMode) ? normalized as SslMode : undefined
+}
+
 function buildDefaultName(driverName: string, host?: string, database?: string, filePath?: string): string {
   const target = database || (filePath ? path.basename(filePath) : undefined) || host || 'Connection'
   return `${driverName} ${target}`
@@ -297,6 +309,9 @@ function addCommonConnectionParams(params: URLSearchParams, profile: DbConnectio
   params.set('name', profile.name)
   if (profile.ssl !== undefined) {
     params.set('ssl', String(profile.ssl))
+  }
+  if (profile.sslMode) {
+    params.set('sslmode', profile.sslMode)
   }
   if (profile.clientDriver) {
     params.set('clientDriver', profile.clientDriver)

@@ -26,6 +26,9 @@ export type DatabaseDriverId =
   | 'parquet'
   | 'avro'
 
+/** SSL 连接模式,对应 PostgreSQL 的 sslmode 参数 */
+export type SslMode = 'disable' | 'prefer' | 'require' | 'verify-ca' | 'verify-full'
+
 export interface DriverCapabilities {
   schemaBrowse: boolean
   query: boolean
@@ -57,6 +60,8 @@ export interface DbConnectionProfile {
   username?: string
   filePath?: string
   ssl?: boolean
+  /** SSL 模式,对应 PostgreSQL 的 sslmode 参数;优先于 ssl boolean */
+  sslMode?: SslMode
   clientDriver?: string
   charset?: string
   keepAliveInterval?: number

@@ -366,6 +366,7 @@ export class ConnectionDashboard {
       username: profileData.username,
       filePath: profileData.filePath,
       ssl: profileData.ssl,
+      sslMode: profileData.sslMode,
       clientDriver: profileData.clientDriver,
       charset: profileData.charset,
       keepAliveInterval: profileData.keepAliveInterval,
@@ -1622,9 +1623,16 @@ export class ConnectionDashboard {
 
         <section class="panel" data-panel="ssl">
           <div class="form-grid">
-            <label class="caption"></label>
-            <label class="row-check"><input type="checkbox" id="ssl" ${existingProfile?.ssl ? 'checked' : ''}> ${t('form.sslEnabled')}</label>
-            <div class="note">当前先使用驱动默认 SSL 参数；证书、密钥和 CA 文件可以后续扩展为独立字段。</div>
+            <label class="caption" for="sslMode">${t('form.sslMode')}</label>
+            <select id="sslMode" class="select">
+              <option value="" ${!existingProfile?.sslMode ? 'selected' : ''}>${t('form.sslModeDefault')}</option>
+              <option value="disable" ${existingProfile?.sslMode === 'disable' ? 'selected' : ''}>disable — ${t('form.sslModeDisable')}</option>
+              <option value="prefer" ${existingProfile?.sslMode === 'prefer' ? 'selected' : ''}>prefer — ${t('form.sslModePrefer')}</option>
+              <option value="require" ${existingProfile?.sslMode === 'require' ? 'selected' : ''}>require — ${t('form.sslModeRequire')}</option>
+              <option value="verify-ca" ${existingProfile?.sslMode === 'verify-ca' ? 'selected' : ''}>verify-ca — ${t('form.sslModeVerifyCa')}</option>
+              <option value="verify-full" ${existingProfile?.sslMode === 'verify-full' ? 'selected' : ''}>verify-full — ${t('form.sslModeVerifyFull')}</option>
+            </select>
+            <div class="note">${t('form.sslModeNote')}</div>
           </div>
         </section>
 
@@ -1870,6 +1878,7 @@ export class ConnectionDashboard {
 
     function collectProfile() {
       const isFile = fileDrivers.indexOf(selectedDriverId) !== -1;
+      const sslModeValue = isFile ? '' : (document.getElementById('sslMode')?.value || '');
       return {
         id: optionalText('id'),
         name: document.getElementById('name').value.trim(),
@@ -1879,7 +1888,8 @@ export class ConnectionDashboard {
         database: isFile ? undefined : optionalText('database'),
         username: isFile ? undefined : optionalText('username'),
         filePath: isFile ? optionalText('filePath') : undefined,
-        ssl: isFile ? false : document.getElementById('ssl').checked,
+        sslMode: sslModeValue || undefined,
+        ssl: sslModeValue ? sslModeValue !== 'disable' : undefined,
         clientDriver: optionalText('clientDriver'),
         charset: optionalText('charset'),
         keepAliveInterval: readOptionalNumber('keepAliveInterval'),
@@ -2183,10 +2193,15 @@ export class ConnectionDashboard {
           <input type="password" id="password" class="form-input" placeholder="Password (stored securely)">
         </div>
         <div class="form-group">
-          <div class="form-checkbox">
-            <input type="checkbox" id="ssl" ${existingProfile?.ssl ? 'checked' : ''}>
-            <label for="ssl">${t('form.sslEnabled')}</label>
-          </div>
+          <label class="form-label">${t('form.sslMode')}</label>
+          <select id="sslMode" class="form-input">
+            <option value="" ${!existingProfile?.sslMode ? 'selected' : ''}>${t('form.sslModeDefault')}</option>
+            <option value="disable" ${existingProfile?.sslMode === 'disable' ? 'selected' : ''}>disable — ${t('form.sslModeDisable')}</option>
+            <option value="prefer" ${existingProfile?.sslMode === 'prefer' ? 'selected' : ''}>prefer — ${t('form.sslModePrefer')}</option>
+            <option value="require" ${existingProfile?.sslMode === 'require' ? 'selected' : ''}>require — ${t('form.sslModeRequire')}</option>
+            <option value="verify-ca" ${existingProfile?.sslMode === 'verify-ca' ? 'selected' : ''}>verify-ca — ${t('form.sslModeVerifyCa')}</option>
+            <option value="verify-full" ${existingProfile?.sslMode === 'verify-full' ? 'selected' : ''}>verify-full — ${t('form.sslModeVerifyFull')}</option>
+          </select>
         </div>
       </div>
 
@@ -2271,7 +2286,8 @@ export class ConnectionDashboard {
       
       const driverId = document.getElementById('driverId').value;
       const isFileDriver = fileDrivers.includes(driverId);
-      
+      const sslModeValue = isFileDriver ? '' : (document.getElementById('sslMode')?.value || '');
+
       const profile = {
         id: document.getElementById('id').value || undefined,
         name: document.getElementById('name').value,
@@ -2281,7 +2297,8 @@ export class ConnectionDashboard {
         database: isFileDriver ? undefined : document.getElementById('database').value,
         username: isFileDriver ? undefined : document.getElementById('username').value,
         filePath: isFileDriver ? document.getElementById('filePath').value : undefined,
-        ssl: isFileDriver ? false : document.getElementById('ssl').checked,
+        sslMode: sslModeValue || undefined,
+        ssl: sslModeValue ? sslModeValue !== 'disable' : undefined,
         createdAt: document.getElementById('createdAt').value || undefined
       };
 

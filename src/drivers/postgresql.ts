@@ -9,6 +9,7 @@ import {
   SchemaObject,
   SchemaObjectType,
   SchemaScope,
+  SslMode,
   TableColumn,
   TableForeignKey,
   TableIndex,
@@ -60,12 +61,25 @@ export class PostgreSQLDriver implements DatabaseDriver {
         database,
         user: profile.username,
         password,
-        ssl: profile.ssl ? { rejectUnauthorized: false } : false,
+        ssl: this.resolveSslConfig(profile),
         connectionTimeoutMillis: (profile.connectTimeout ?? 30) * 1000
       })
       this.pools.set(key, pool)
     }
     return this.pools.get(key)!
+  }
+
+  /**
+   * 根据 profile.sslMode 或 profile.ssl 解析 pg 库的 ssl 配置。
+   * - sslMode 优先于 ssl boolean
+   * - PostgreSQL 默认不启用 SSL(除非 ssl=true 或 sslMode 非 disable)
+   */
+  protected resolveSslConfig(profile: DbConnectionProfile): false | { rejectUnauthorized: boolean } {
+    const mode = profile.sslMode
+    if (mode) {
+      return sslModeToPgConfig(mode)
+    }
+    return profile.ssl ? { rejectUnauthorized: false } : false
   }
 
   protected async loggedPoolQuery(
@@ -1030,4 +1044,21 @@ function isPostgresJsonColumn(column: TableColumn | undefined): boolean {
   }
   const normalizedType = column.type.trim().toLowerCase()
   return normalizedType === 'json' || normalizedType === 'jsonb'
+}
+
+/** 将 sslMode 转换为 pg 库的 ssl 配置对象 */
+function sslModeToPgConfig(mode: SslMode): false | { rejectUnauthorized: boolean } {
+  switch (mode) {
+    case 'disable':
+      return false
+    case 'verify-ca':
+    case 'verify-full':
+      // 需要验证 CA 证书;当前未支持自定义 CA,先要求验证(连接无 CA 的服务端会失败)
+      return { rejectUnauthorized: true }
+    case 'prefer':
+    case 'require':
+    default:
+      // require / prefer:加密传输但不验证证书,兼容自签证书的云端数据库(如 CockroachDB)
+      return { rejectUnauthorized: false }
+  }
 }

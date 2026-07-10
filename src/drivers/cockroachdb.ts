@@ -23,13 +23,24 @@ export class CockroachDBDriver extends PostgreSQLDriver {
         database,
         user: profile.username || 'root',
         password,
-        ssl: profile.ssl !== false ? { rejectUnauthorized: false } : false,
+        ssl: this.resolveSslConfig(profile),
         connectionTimeoutMillis: (profile.connectTimeout ?? 30) * 1000,
         max: 10
       })
       this.cockroachPools.set(key, pool)
     }
     return this.cockroachPools.get(key)!
+  }
+
+  /**
+   * CockroachDB 的 SSL 解析:默认启用 SSL(云端 CockroachDB 通常强制 SSL)
+   * - sslMode 优先;未设置时,仅当 ssl === false 才禁用 SSL(其余情况均启用)
+   */
+  protected override resolveSslConfig(profile: DbConnectionProfile): false | { rejectUnauthorized: boolean } {
+    if (profile.sslMode) {
+      return super.resolveSslConfig(profile)
+    }
+    return profile.ssl === false ? false : { rejectUnauthorized: false }
   }
 
   override async listDatabases(profile: DbConnectionProfile): Promise<{ name: string; description?: string }[]> {
